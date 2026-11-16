@@ -190,3 +190,104 @@ Mais recentes no fim.
   qual versão dos rótulos o número foi gerado. Se um rótulo for corrigido, o número muda e o
   hash também.
 - **Descartado:** imagem PNG da matriz de confusão (exigiria matplotlib em produção).
+
+## Fase 4 — Agente
+
+### D25. Modelo sem padrão no código; Sonnet 5.5 durante o desenvolvimento
+- **O quê:** `ANTHROPIC_MODEL` é obrigatório (erro claro se faltar). Na Fase 4 usamos
+  `claude-sonnet-5-5`; o padrão do projeto sai da comparação Opus × Sonnet × Haiku na Fase 5.
+- **Por quê:** escolher modelo é decisão de custo/qualidade e deve vir de medição, não de
+  palpite. Um padrão escondido no código também contaminaria a comparação.
+- **Descartado:** fixar um modelo agora e trocar depois.
+
+### D26. Sem `temperature` e sem `thinking`; custo controlado por `effort`
+- **O quê:** a requisição só leva `output_config={"effort": "low"}` (configurável por
+  `ANTHROPIC_EFFORT`).
+- **Por quê:** os modelos atuais rejeitam `temperature`/`top_p` com valor não padrão (erro 400), e
+  não existe um jeito de desligar o raciocínio que funcione nos três modelos da comparação
+  (Sonnet e Opus 5.5 recusam `thinking: disabled`). `effort: low` é aceito por todos e é o
+  controle certo para uma tarefa simples. Consequência: as respostas não são determinísticas;
+  a Fase 5 deve repetir medições sensíveis e reportar a variação.
+- **Descartado:** `temperature=0` (400 nesses modelos) e `thinking: disabled` (incompatível
+  entre modelos).
+
+### D27. Saída estruturada com `messages.parse` + Pydantic
+- **O quê:** `classify` e `review` devolvem modelos Pydantic via `output_format`; o schema JSON
+  enviado ao modelo é gerado dos próprios tipos (`Literal` em `labels.py`).
+- **Por quê:** o schema restringe a geração (não só pede "responda em JSON"), então a categoria
+  nunca sai fora da lista, e o SDK já devolve o objeto validado. A lista de rótulos fica em
+  um único lugar.
+- **Descartado:** pedir JSON no prompt e fazer `json.loads` (frágil); *tool use* forçado
+  (`tool_choice` forçado é rejeitado nesses modelos).
+
+### D28. Recusa do modelo é desfecho de negócio, não exceção solta
+- **O quê:** `stop_reason == "refusal"` vira `LLMRefusal`; `run()` captura e devolve o resultado
+  parcial com `escalate_to_human=True` e o motivo. Resposta truncada por `max_tokens` é erro.
+- **Por quê:** avaliações são texto de usuário e podem acionar os classificadores de segurança.
+  Um humano deve ver esses casos, e o custo da chamada recusada continua contado.
+- **Não adotado (decisão sua):** *fallback* automático para outro modelo no servidor. Ele
+  esconderia qual modelo respondeu cada avaliação e contaminaria a comparação da Fase 5.
+
+### D29. `LLM` como `Protocol` de dois métodos
+- **O quê:** o agente depende de `parse()` e `text()`; `AnthropicLLM` é a implementação real.
+- **Por quê:** é a única abstração do projeto, e tem dois usos concretos: testes com LLM
+  simulado (exigência da CI) e a Fase 5 medir custo/latência pela mesma interface.
+- **Descartado:** `unittest.mock` nos testes (acopla ao formato interno do SDK); camada
+  genérica multi-provedor (YAGNI).
+
+### D30. Escalonamento por regra em código, num nó `finalize` sem LLM
+- **O quê:** `escalate_to_human` é verdadeiro se a urgência é alta, ou se a revisão não aprovou
+  depois das tentativas. Um nó próprio aplica a regra.
+- **Por quê:** "quando chamar um humano" precisa ser previsível e testável, não depender de um
+  LLM. Isso acrescenta um nó ao desenho de quatro passos, mas mantém o grafo como a única
+  fonte do comportamento (API e avaliação só chamam `run()`).
+- **Interpretação a confirmar:** "máx. 2 tentativas" foi lido como **até 2 reescritas** (no
+  máximo 3 rascunhos). Se a intenção era 2 rascunhos no total, é só mudar `MAX_REDRAFTS` para 1.
+
+### D31. Busca de política: embeddings locais, Chroma em memória, consulta com dica de categoria
+- **O quê:** `paraphrase-multilingual-MiniLM-L12-v2` (local, multilíngue) gera os vetores; o Chroma
+  guarda 20 seções e é reconstruído ao iniciar; a consulta é `"<dica da categoria>. <texto>"`;
+  top-3.
+- **Por quê:** o corpus tem poucas dezenas de seções, então reconstruir o índice leva menos
+  tempo do que o modelo leva para carregar, e some o problema de índice desatualizado. A
+  dica da categoria usa o resultado do `classify` para orientar a busca.
+- **Hipótese ainda não medida:** que a dica melhora o acerto da busca. A Fase 5 mede o hit rate
+  com e sem ela, sem chamar LLM (usando o rótulo do gold set).
+- **Descartado:** Chroma persistente (invalidação de cache sem ganho); filtro rígido por
+  categoria (um erro de classificação tiraria a política certa da busca).
+
+### D32. Seções curtas (≤ 80 palavras), conferidas por teste
+- **O quê:** a política é dividida por seção `##`, e um teste falha se alguma passar de 80 palavras.
+- **Por quê:** o modelo de embeddings lê no máximo 128 tokens e descarta o resto em silêncio. Seção
+  longa demais perde o final e a busca piora sem aviso.
+- **Descartado:** *chunking* por janela deslizante (corta regras no meio); um modelo de
+  embeddings maior (mais pesado para ganho incerto neste corpus).
+
+### D33. Texto da avaliação tratado como dado não confiável
+- **O quê:** a avaliação vai entre tags com `<` e `>` escapados; todos os prompts mandam não seguir
+  instruções vindas do texto; o `review` desconfia tanto da avaliação quanto do rascunho.
+- **Por quê:** quem escreve a avaliação controla parte do prompt (injeção de prompt). Escapar
+  impede "fechar" a tag; o que protege de verdade é o `review` conferir o rascunho contra a
+  política, mais o atendente humano no fim.
+- **Limite:** não é à prova de falhas; a Fase 5 deveria incluir alguns casos adversariais no gold set.
+
+### D34. Prompts em `prompts/*.md`, versão = hash do conteúdo
+- **O quê:** um arquivo por prompt; `prompt_version()` devolve o SHA-256 curto do texto.
+- **Por quê:** mudou o texto, mudou a versão, sem depender de lembrar de "subir o número". O
+  relatório da Fase 5 registra o hash e o git guarda o histórico e o porquê.
+- **Atenção:** `classify.md` espelha o `LABELING_GUIDE.md` (mesmas definições e regras de
+  desempate). Se o guia mudar, o prompt deve mudar junto; um teste só garante que todos os
+  rótulos aparecem no prompt.
+- **Descartado:** número de versão manual; prompts dentro do código Python.
+
+### D35. `pydantic` declarado como dependência direta
+- **O quê:** `pydantic` entra no `pyproject.toml`, embora o `anthropic` e o `langgraph` já o
+  tragam.
+- **Por quê:** o projeto o importa diretamente; depender de uma dependência transitiva quebra
+  quando ela deixa de ser instalada. Não instala nenhum pacote novo.
+
+### D36. Cache de prompt e streaming não usados
+- **O quê:** nem `cache_control` nem streaming.
+- **Por quê:** os prompts de sistema são curtos (abaixo do tamanho mínimo cacheável) e as saídas
+  são pequenas. O `LLMCall` já registra tokens de cache lidos/escritos, então a Fase 5 mostra se
+  vale a pena (por exemplo, se o prompt crescer).

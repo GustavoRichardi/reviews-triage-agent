@@ -15,7 +15,42 @@ resposta para um atendente revisar — o humano continua no controle da decisão
 
 ## Arquitetura
 
-_(Fase 4 — diagrama Mermaid do grafo classify → retrieve_policy → draft → review.)_
+O agente é um grafo [LangGraph](https://langchain-ai.github.io/langgraph/) de quatro passos
+mais um passo final sem LLM:
+
+```mermaid
+flowchart TD
+    A([avaliação + nota]) --> B[classify<br/>categoria, sentimento, urgência]
+    B --> C[retrieve_policy<br/>busca vetorial em docs/politicas]
+    C --> D[draft<br/>resposta em até 3 frases]
+    D --> E{review<br/>promete algo fora<br/>da política?}
+    E -- reprovada, tentativas restantes --> D
+    E -- aprovada, ou tentativas esgotadas --> F[finalize<br/>regras de escalonamento]
+    F --> G([categoria, urgência, resposta, fontes,<br/>escalate_to_human])
+```
+
+- **classify** devolve uma saída estruturada validada por Pydantic.
+- **retrieve_policy** busca as 3 seções de política mais próximas (embeddings locais +
+  Chroma).
+- **draft** escreve a resposta usando só os trechos recuperados.
+- **review** reprova respostas que prometem algo fora da política; o rascunho volta com o
+  motivo, até 2 vezes.
+- **finalize** (código, sem LLM) marca `escalate_to_human` se a urgência for alta ou se a
+  revisão não aprovou a resposta.
+
+Os prompts ficam em [`prompts/`](prompts/), versionados no git; os relatórios registram o
+hash de cada um.
+
+### Política de atendimento (fictícia)
+
+> ⚠️ **A política em [`docs/politicas/`](docs/politicas/) é fictícia.** Foi escrita para este
+> projeto de portfólio e não representa a política de nenhuma empresa real. Cada arquivo traz
+> esse aviso no topo.
+
+O agente só pode prometer o que está nela: prazos de troca e devolução, reembolso em até
+10 dias úteis no mesmo meio de pagamento, compensações por atraso (frete reembolsado a
+partir de 3 dias úteis; acima de 7 dias úteis, cupom de 15% e cancelamento com reembolso
+total) e quem paga o frete de devolução.
 
 ## Dados
 
@@ -48,9 +83,17 @@ A exploração inicial (distribuição de notas, tamanho dos textos) está em
 Pré-requisitos: [uv](https://docs.astral.sh/uv/) e `make`.
 
 ```bash
-cp .env.example .env   # preencha as chaves quando chegar na Fase 4
+cp .env.example .env   # preencha ANTHROPIC_API_KEY e ANTHROPIC_MODEL
 make install
-make check             # lint + testes
+make check             # lint + testes (não usam chave de API: o LLM é simulado)
+```
+
+Para testar o agente em uma avaliação (usa a API e baixa o modelo de embeddings, ~470 MB, na
+primeira vez):
+
+```bash
+make triage TEXT="Meu pedido chegou 10 dias atrasado e ninguém responde" SCORE=1
+make policy-search Q="pedido atrasado"   # só a busca, sem LLM
 ```
 
 `make help` lista todos os comandos.

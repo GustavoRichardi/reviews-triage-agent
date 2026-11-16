@@ -5,8 +5,13 @@ description = "Agente que tria avaliações de e-commerce em português, busca a
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=2.9.0",
+    "chromadb>=1.5.9",
+    "langgraph>=1.2.22",
     "pandas>=3.1.1",
+    "pydantic>=2.14.3",
     "scikit-learn>=1.9.1",
+    "sentence-transformers>=6.3.0",
 ]
 
 [dependency-groups]

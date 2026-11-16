@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check data gold gold-check baseline
+.PHONY: help install lint format test check data gold gold-check baseline policy-search triage
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -36,3 +36,9 @@ gold-check: ## Valida os rótulos em data/gold/gold.csv e mostra o progresso
 
 baseline: ## Avalia TF-IDF + Regressão Logística no gold set e gera reports/baseline.md
 	uv run python -m reviews_triage.baseline
+
+policy-search: ## Mostra os trechos de política que a busca devolve (ex.: make policy-search Q="pedido atrasou")
+	uv run python -m reviews_triage.policy "$(Q)"
+
+triage: ## Triagem de uma avaliação com o agente real (ex.: make triage TEXT="Atrasou 10 dias" SCORE=1)
+	uv run python -m reviews_triage.agent --text "$(TEXT)" $(if $(SCORE),--score $(SCORE),)

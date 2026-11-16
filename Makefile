@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check data gold gold-check baseline policy-search triage
+.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -42,3 +42,12 @@ policy-search: ## Mostra os trechos de política que a busca devolve (ex.: make 
 
 triage: ## Triagem de uma avaliação com o agente real (ex.: make triage TEXT="Atrasou 10 dias" SCORE=1)
 	uv run python -m reviews_triage.agent --text "$(TEXT)" $(if $(SCORE),--score $(SCORE),)
+
+eval-retrieval: ## Hit rate da busca no gold set, sem LLM (custo zero)
+	uv run python -m reviews_triage.evaluation retrieval
+
+eval: ## Avalia o agente no gold set (MODEL=..., LIMIT=n opcional; só gasta com YES=1)
+	uv run python -m reviews_triage.evaluation run $(if $(MODEL),--model $(MODEL),) $(if $(LIMIT),--limit $(LIMIT),) $(if $(YES),--yes,)
+
+eval-compare: ## Tabela comparando as rodadas salvas em reports/runs (sem LLM)
+	uv run python -m reviews_triage.evaluation compare $(RUNS)

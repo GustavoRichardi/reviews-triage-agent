@@ -4,6 +4,7 @@ import hashlib
 import math
 import re
 
+from reviews_triage.judge import JudgeScores
 from reviews_triage.llm import LLMRefusal
 from reviews_triage.schemas import Classification, LLMCall, ReviewVerdict
 
@@ -11,8 +12,8 @@ APPROVED = ReviewVerdict(aprovada=True, problemas=[])
 REJECTED = ReviewVerdict(aprovada=False, problemas=["Promete cupom que a política não prevê."])
 
 
-def make_call(step: str) -> LLMCall:
-    return LLMCall(step=step, model="fake", input_tokens=100, output_tokens=20, latency_s=0.01)
+def make_call(step: str, model: str = "fake") -> LLMCall:
+    return LLMCall(step=step, model=model, input_tokens=100, output_tokens=20, latency_s=0.01)
 
 
 class FakeLLM:
@@ -24,6 +25,8 @@ class FakeLLM:
         drafts: list[str] | None = None,
         verdicts: list[ReviewVerdict] | None = None,
         refuse_step: str | None = None,
+        judge_scores: JudgeScores | None = None,
+        model: str = "fake",
     ):
         self.classification = classification or Classification(
             categoria="atraso_entrega", sentimento="negativo", urgencia="media"
@@ -31,6 +34,10 @@ class FakeLLM:
         self.drafts = drafts or ["Sentimos muito pelo atraso. Vamos analisar o seu caso."]
         self.verdicts = verdicts or [APPROVED]
         self.refuse_step = refuse_step
+        self.judge_scores = judge_scores or JudgeScores(
+            justificativa="Segue a política.", aderencia=5, tom=4, utilidade=4
+        )
+        self.model = model
         self.calls: list[tuple[str, str, str]] = []  # (step, system, user)
         self._n = {"draft": 0, "review": 0}
 
@@ -41,7 +48,7 @@ class FakeLLM:
 
     def _record(self, step: str, system: str, user: str) -> LLMCall:
         self.calls.append((step, system, user))
-        call = make_call(step)
+        call = make_call(step, self.model)
         if step == self.refuse_step:
             raise LLMRefusal(step, call, "general_harms")
         return call
@@ -50,6 +57,8 @@ class FakeLLM:
         call = self._record(step, system, user)
         if step == "classify":
             return self.classification, call
+        if step == "judge":
+            return self.judge_scores, call
         return self._next("review", self.verdicts), call
 
     def text(self, step, system, user):

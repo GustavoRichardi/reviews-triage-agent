@@ -319,3 +319,101 @@ Mais recentes no fim.
 - **Por quê:** decisão de negócio do projeto. Escrever "não se somam" de forma literal importa
   para o agente: uma frase ambígua na política vira promessa errada na resposta.
 - **Descartado:** compensações cumulativas (versão do primeiro rascunho da política).
+
+## Fase 5 — Avaliação
+
+### D40. Juiz: `claude-fable-5-2`, fixo em código
+- **O quê:** `JUDGE_MODEL = "claude-fable-5-2"`, `JUDGE_EFFORT = "medium"`, como constantes em
+  `judge.py`, não variáveis de ambiente. A avaliação se recusa a rodar se o modelo avaliado
+  for o próprio juiz.
+- **Por quê:** o juiz precisa (1) ser o mesmo nas três rodadas, senão a nota mede o juiz e não o
+  agente, e (2) nunca avaliar o próprio modelo, porque LLMs tendem a favorecer textos que
+  eles mesmos gerariam (*self-preference bias*). Como Opus, Sonnet e Haiku 5.5 estão todos na
+  comparação, nenhum deles serve: qualquer um julgaria a si mesmo em uma rodada. O Fable 5.2
+  não é candidato e é mais capaz que os três, o que importa para detectar promessas sutis
+  fora da política. `medium` dá raciocínio suficiente para conferir a resposta contra a
+  política inteira sem pagar pelo `high`.
+- **Custo:** é o modelo mais caro (US$ 8 / 40 por milhão de tokens). Estimativa: ~US$ 0,06
+  por avaliação julgada, ~US$ 9 por rodada de 150, ~US$ 27 nas três. É custo de medição, não
+  de produção.
+- **Risco:** o Fable 5.2 exige retenção de dados de 30 dias; organizações com *zero data
+  retention* recebem erro 400.
+- **Descartado:** um dos três candidatos (julgaria a si mesmo); juiz variando por rodada (para
+  cada candidato, um juiz diferente); `claude-opus-4-8` (mais barato, mas da mesma família do
+  Opus 5.5, então o viés de autopreferência pode aparecer em parte).
+
+### D41. Rubrica do juiz congelada antes de qualquer rodada real
+- **O quê:** `prompts/judge.md` foi escrito e congelado com hash **`edf6a162`** antes de
+  qualquer execução com dados reais. O hash está em `JUDGE_PROMPT_VERSION`; o `Judge` se recusa
+  a rodar se o arquivo não bater, e um teste falha se a rubrica ou a configuração do juiz mudar.
+- **Por quê:** rubrica ajustada depois de ver os resultados vira métrica escolhida para parecer
+  boa. Congelar antes torna a nota um compromisso prévio.
+- **Se precisar mudar:** nova entrada aqui com o motivo, constante atualizada e **todas** as
+  rodadas refeitas; a comparação marca como "não comparáveis" rodadas com rubricas diferentes.
+- **Descartado:** só versionar pelo git (não impede rodar com uma rubrica editada sem perceber).
+
+### D42. Rubrica com âncoras por nível, critérios independentes, justificativa antes da nota
+- **O quê:** cada critério (aderência, tom, utilidade) descreve o que vale 1, 2, 3, 4 e 5. O
+  juiz escreve a justificativa citando os trechos e só depois dá as notas, usando saída
+  estruturada (`Literal[1..5]`).
+- **Por quê:** uma escala sem âncoras deixa cada nota ao gosto do momento e as médias
+  derivam. Justificar antes de dar a nota obriga o juiz a olhar a evidência, e a
+  justificativa serve para auditar os piores casos no relatório.
+- **Descartado:** nota única de 1 a 10 (não diz o que errou); comparação par a par entre
+  modelos (custo quadrático e não dá nota absoluta).
+
+### D43. O juiz vê a política inteira, não só os trechos recuperados
+- **O quê:** o juiz recebe as 20 seções da política, a avaliação, a nota e a resposta. Não
+  recebe a categoria prevista.
+- **Por quê:** se a busca trouxe a política errada, a resposta pode seguir os trechos e mesmo
+  assim estar errada para o cliente. Julgar contra a política inteira mede o resultado que o
+  cliente veria. Sem a categoria prevista, o juiz não é ancorado pelo próprio erro do agente.
+- **Descartado:** julgar só contra os trechos recuperados (esconderia erros de busca).
+
+### D44. Resultados brutos são a fonte da verdade; relatórios são derivados
+- **O quê:** cada rodada grava `meta.json` (modelo, effort, juiz, hashes de todos os prompts,
+  sha do gold set, commit do git), `results.jsonl` (uma linha por avaliação, gravada assim que
+  sai) e `summary.json`; o `.md` é gerado a partir deles. `make eval-compare` não chama LLM.
+- **Por quê:** a parte cara (chamadas de API) roda uma vez e fica guardada; relatórios e
+  comparações podem ser refeitos de graça. A gravação incremental não perde o que já foi pago
+  se a rodada cair no meio. O commit e os hashes dizem exatamente o que gerou cada número.
+- **Descartado:** só o relatório final em Markdown (não dá para recalcular nem auditar).
+
+### D45. Intervalo de confiança por bootstrap pareado
+- **O quê:** 1.000 reamostragens das mesmas avaliações para o F1 macro do agente, do baseline e
+  da diferença entre eles.
+- **Por quê:** com 150 exemplos, diferenças de alguns pontos de F1 podem ser ruído. Pareado (a
+  mesma reamostragem para os dois modelos) isola a diferença entre modelos da variação entre
+  amostras. Se o intervalo da diferença contém zero, o relatório não declara vencedor.
+- **Descartado:** reportar só o número pontual; teste de McNemar (só olha a accuracy, não o F1 macro).
+
+### D46. Hit rate da busca por categoria, com ablação sem LLM
+- **O quê:** cada categoria do gold set tem um documento esperado (`EXPECTED_SOURCES`); hit@3 =
+  esse documento aparece entre as 3 fontes. Além do hit@3 do agente (com a categoria prevista),
+  `make eval-retrieval` compara a consulta só com o texto e com a dica da categoria do gold set.
+- **Por quê:** testa a hipótese da D31 sem gastar com API. A variante com o rótulo do gold set
+  é o teto (classificação perfeita); a diferença para o hit@3 do agente mostra quanto o erro
+  de classificação prejudica a busca.
+- **Limite:** relevância por categoria é uma aproximação; uma avaliação de atraso pode ser bem
+  servida pela política de reembolso, e isso conta como erro.
+
+### D47. Custo calculado a partir de tokens medidos e de uma tabela de preços datada
+- **O quê:** custo = tokens reais de cada chamada × preço do modelo (`PRICES_PER_MTOK`, preços
+  de 2026-11). O custo do agente (o que existiria em produção) é reportado separado do custo do
+  juiz (só existe na avaliação). Modelo sem preço na tabela gera erro.
+- **Por quê:** custo por 1.000 avaliações é o número que um gestor usa para decidir; misturar o
+  custo do juiz inflaria o custo de produção. Erro para modelo sem preço evita reportar zero
+  por engano.
+- **Limite:** tokens de cache não são precificados (não usamos cache); se aparecerem, o
+  relatório avisa.
+
+### D48. Gasto só com confirmação explícita; piloto antes da rodada completa
+- **O quê:** `make eval` sem `YES=1` só mostra a estimativa e para. `LIMIT=10` roda um piloto.
+  Erros de API numa avaliação ficam registrados e não derrubam a rodada; 4 avaliações em
+  paralelo.
+- **Por quê:** a rodada completa custa dólares de verdade; um comando digitado errado não deve
+  gastar. O piloto mede o custo real (a estimativa de tokens é grosseira) antes do gasto maior.
+  O paralelismo reduz uma rodada de ~40 min para ~10 min, porque o tempo é quase todo espera
+  de rede.
+- **Atenção:** a latência é medida por avaliação, com 4 em paralelo; sob limite de taxa da
+  API ela pode sair um pouco maior do que com uma avaliação por vez.

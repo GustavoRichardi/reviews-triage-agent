@@ -57,7 +57,7 @@ class TriageState(TypedDict, total=False):
 # reduz o risco de injeção de prompt; a barreira de verdade é o passo `review`.
 
 
-def _escape(text: str) -> str:
+def escape_text(text: str) -> str:
     return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -65,7 +65,7 @@ def _review_block(state: TriageState) -> str:
     score = state.get("review_score")
     return (
         f"<nota>{score if score is not None else 'não informada'}</nota>\n"
-        f"<avaliacao>\n{_escape(state['review_text'])}\n</avaliacao>"
+        f"<avaliacao>\n{escape_text(state['review_text'])}\n</avaliacao>"
     )
 
 
@@ -144,7 +144,7 @@ class TriageAgent:
             [
                 _review_block(state),
                 _policy_block(state["policy_chunks"]),
-                f"<resposta>\n{_escape(state['draft'])}\n</resposta>",
+                f"<resposta>\n{escape_text(state['draft'])}\n</resposta>",
             ]
         )
         verdict, call = self.llm.parse("review", self.prompts["review"], user, ReviewVerdict)

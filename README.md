@@ -98,6 +98,32 @@ make policy-search Q="pedido atrasado"   # só a busca, sem LLM
 
 `make help` lista todos os comandos.
 
+## Avaliação
+
+`make eval` roda o agente nas 150 avaliações do gold set e grava `reports/eval_<data>_<modelo>.md`:
+
+- **Categoria:** F1 macro do agente contra o baseline, com intervalo de confiança de 95%
+  (bootstrap pareado);
+- **Urgência:** accuracy e recall dos casos de urgência alta;
+- **Busca:** hit rate (o documento de política esperado está entre as fontes?), com uma
+  comparação sem LLM entre consultas com e sem a dica de categoria;
+- **LLM-as-judge:** nota de 1 a 5 para aderência à política, tom e utilidade, com rubrica
+  explícita em [`prompts/judge.md`](prompts/judge.md);
+- **Operação:** taxa de escalonamento, custo por 1.000 avaliações e latência p50/p95.
+
+O juiz é o `claude-fable-5-2`, fixo em todas as rodadas e diferente de todos os modelos
+comparados; a rubrica foi congelada (hash `edf6a162`) antes de qualquer rodada real. Cada
+rodada salva os resultados brutos em `reports/runs/<rodada>/` (com commit, hashes dos prompts
+e do gold set), e `make eval-compare` monta a tabela entre rodadas, avisando se alguma não for
+comparável.
+
+```bash
+make eval-retrieval                               # grátis: só a busca
+make eval MODEL=claude-sonnet-5-5 LIMIT=10        # mostra a estimativa de custo e para
+make eval MODEL=claude-sonnet-5-5 LIMIT=10 YES=1  # piloto pago com 10 avaliações
+make eval-compare
+```
+
 ## Resultados
 
 **Baseline clássico** (`make baseline`): TF-IDF + Regressão Logística, avaliado com validação

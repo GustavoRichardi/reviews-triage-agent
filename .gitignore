@@ -1,0 +1,29 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Ferramentas
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Segredos: nunca versionar o .env (só o .env.example)
+.env
+
+# Dados brutos do Kaggle: licença e tamanho; cada um baixa o seu (ver README)
+data/raw/*
+!data/raw/.gitkeep
+# Dados derivados: regeneráveis a partir de data/raw com `make data`
+data/processed/
+
+# Índice vetorial local (Chroma): regenerável a partir de docs/politicas
+.chroma/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store

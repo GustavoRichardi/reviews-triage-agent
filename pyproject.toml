@@ -1,0 +1,33 @@
+[project]
+name = "reviews-triage-agent"
+version = "0.1.0"
+description = "Agente que tria avaliações de e-commerce em português, busca a política certa e sugere uma resposta."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "reviews_triage"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/F: erros básicos e pyflakes; I: ordenação de imports; UP: sintaxe moderna;
+# B: bugs comuns (bugbear); SIM: simplificações.
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

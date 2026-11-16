@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare
+.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare pilot judge-export judge-agreement
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -46,8 +46,17 @@ triage: ## Triagem de uma avaliação com o agente real (ex.: make triage TEXT="
 eval-retrieval: ## Hit rate da busca no gold set, sem LLM (custo zero)
 	uv run python -m reviews_triage.evaluation retrieval
 
-eval: ## Avalia o agente no gold set (MODEL=..., LIMIT=n opcional; só gasta com YES=1)
-	uv run python -m reviews_triage.evaluation run $(if $(MODEL),--model $(MODEL),) $(if $(LIMIT),--limit $(LIMIT),) $(if $(YES),--yes,)
+eval: ## Avalia o agente no gold set (MODEL=..., JUDGE_SAMPLE=n, LIMIT=n; só gasta com YES=1)
+	uv run python -m reviews_triage.evaluation run $(if $(MODEL),--model $(MODEL),) $(if $(LIMIT),--limit $(LIMIT),) $(if $(JUDGE_SAMPLE),--judge-sample $(JUDGE_SAMPLE),) $(if $(YES),--yes,)
 
 eval-compare: ## Tabela comparando as rodadas salvas em reports/runs (sem LLM)
 	uv run python -m reviews_triage.evaluation compare $(RUNS)
+
+pilot: ## Piloto fora do gold set: custo real + arquivo para validar o juiz (MODEL=..., N=10; só gasta com YES=1)
+	uv run python -m reviews_triage.evaluation pilot $(if $(MODEL),--model $(MODEL),) $(if $(N),--n $(N),) $(if $(YES),--yes,)
+
+judge-export: ## Gera o CSV para você dar notas às cegas (RUN=reports/runs/<rodada>; padrão: último piloto)
+	uv run python -m reviews_triage.judge_validation export $(if $(RUN),--run $(RUN),)
+
+judge-agreement: ## Concordância juiz × suas notas (RUN=...; padrão: último piloto)
+	uv run python -m reviews_triage.judge_validation agreement $(if $(RUN),--run $(RUN),)

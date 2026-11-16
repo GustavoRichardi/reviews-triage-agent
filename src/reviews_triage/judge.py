@@ -23,6 +23,7 @@ JUDGE_EFFORT = "medium"
 JUDGE_PROMPT_VERSION = "edf6a162"
 
 Score = Literal[1, 2, 3, 4, 5]
+CRITERIA = ("aderencia", "tom", "utilidade")
 
 
 class JudgeScores(BaseModel):

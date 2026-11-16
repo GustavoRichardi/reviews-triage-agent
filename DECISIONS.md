@@ -417,3 +417,58 @@ Mais recentes no fim.
   de rede.
 - **Atenção:** a latência é medida por avaliação, com 4 em paralelo; sob limite de taxa da
   API ela pode sair um pouco maior do que com uma avaliação por vez.
+
+### D49. Piloto fora do gold set, estratificado por nota
+- **O quê:** `make pilot` roda agente e juiz em N avaliações (padrão 10, 2 por nota) que **não**
+  estão no gold set: exclui o que `make gold` vai sortear (o sorteio é determinístico), os
+  arquivos `to_label.csv`/`gold.csv` existentes e textos idênticos. Substitui o "piloto" com
+  `make eval LIMIT=10` da D48.
+- **Por quê:** (1) o gold set ainda não foi rotulado; quem lê as respostas do agente para
+  essas avaliações (e a validação do juiz exige ler) passa a rotulá-las influenciado pelo
+  agente, o que infla o F1 dele; (2) o piloto não precisa de rótulos, então não espera a
+  rotulagem; (3) estratificar por nota como o gold set deixa o custo medido representativo,
+  porque reclamações geram mais reescritas e respostas mais longas que elogios.
+- **Saída:** custo medido contra o estimado, tokens por passo, latência e projeção das três
+  rodadas com o juiz em 150 e em 60. A projeção para Opus e Haiku usa os tokens medidos com
+  Sonnet (aproximação: modelos geram quantidades diferentes de tokens de saída).
+- **Descartado:** piloto nas 10 primeiras do gold set (contamina a rotulagem).
+
+### D50. Amostra do juiz configurável e igual para todos os modelos
+- **O quê:** `JUDGE_SAMPLE=n` faz o juiz avaliar só n avaliações; F1, busca, custo e latência
+  continuam nas 150. A amostra é estratificada por categoria (cotas proporcionais), com seed fixa,
+  e calculada sobre o gold set inteiro, então é o mesmo conjunto para Opus, Sonnet e Haiku e
+  para qualquer `LIMIT`. O hash do conjunto fica no `meta.json`, e a comparação marca como
+  não comparáveis rodadas com amostras diferentes. As médias do juiz ganham IC 95% (bootstrap).
+- **Por quê:** com o mesmo conjunto, a diferença de nota entre modelos vem dos modelos e não de
+  avaliações diferentes. Estratificar por categoria garante que nenhum tipo de caso suma da
+  amostra. O IC mostra o custo estatístico de julgar 60 em vez de 150.
+- **Padrão:** julga todas, até você decidir o tamanho depois do piloto (a decisão provável é 60).
+- **Descartado:** amostra aleatória por rodada (cada modelo seria julgado em casos diferentes).
+
+### D51. Validação humana do juiz às cegas
+- **O quê:** o piloto gera `data/judge_validation/<rodada>/to_score.csv` com avaliação, nota do
+  cliente e resposta, em ordem embaralhada, **sem** as notas e a justificativa do juiz. O
+  relatório do piloto também não mostra as notas do juiz. Você salva o resultado como
+  `human.csv` (o gerador nunca sobrescreve), e `make judge-agreement` mede, por critério:
+  concordância exata e a até 1 ponto (com IC de Wilson), erro médio, viés (juiz − humano) e
+  kappa de Cohen com peso quadrático. Lista as discordâncias de 2 pontos ou mais, com a
+  justificativa do juiz.
+- **Por quê:** quem vê a nota do juiz antes tende a concordar com ela, e a concordância sai
+  inflada. O IC de Wilson deixa visível o tamanho da incerteza com poucas respostas
+  (9 de 10 é compatível com ~60% de concordância real).
+- **Limite:** com 10 respostas o resultado é indicativo, e o relatório avisa. Um piloto de
+  10 tende a ter poucas respostas ruins, então mal testa se o juiz pega violações.
+
+### D52. Critério de aprovação do juiz pré-registrado (proposta, a confirmar)
+- **O quê:** por critério (aderência, tom, utilidade), o juiz é **aprovado** se: (1) pelo menos 80%
+  das notas dele ficam a no máximo 1 ponto da humana; (2) o viés médio fica entre −0,5 e +0,5;
+  (3) o kappa quadrático é pelo menos 0,40. É **inconclusivo** quando as notas não variam (kappa
+  indefinido) e **reprovado** nos outros casos. As constantes ficam em `judge_validation.py`,
+  definidas antes de existir qualquer nota humana.
+- **Por quê:** é a mesma lógica do congelamento da rubrica: critério escolhido depois de ver a
+  concordância vira critério feito para passar. O kappa entrou depois que um teste com um juiz
+  falso, que dá sempre a mesma nota, **passou** nos critérios (1) e (2): quando a maioria das
+  respostas é boa, um juiz "preguiçoso" que dá 5 para tudo concorda "a até 1 ponto" quase
+  sempre e mesmo assim não detecta nada. O kappa dele é ~0.
+- **Descartado:** só concordância exata (rígida demais para uma escala de 5 pontos); só
+  correlação (não detecta um juiz sistematicamente mais generoso).

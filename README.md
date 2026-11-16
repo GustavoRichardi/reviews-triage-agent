@@ -118,11 +118,30 @@ e do gold set), e `make eval-compare` monta a tabela entre rodadas, avisando se 
 comparável.
 
 ```bash
-make eval-retrieval                               # grátis: só a busca
-make eval MODEL=claude-sonnet-5-5 LIMIT=10        # mostra a estimativa de custo e para
-make eval MODEL=claude-sonnet-5-5 LIMIT=10 YES=1  # piloto pago com 10 avaliações
+make eval-retrieval                                        # grátis: só a busca
+make eval MODEL=claude-sonnet-5-5 JUDGE_SAMPLE=60          # mostra a estimativa e para
+make eval MODEL=claude-sonnet-5-5 JUDGE_SAMPLE=60 YES=1    # rodada completa
 make eval-compare
 ```
+
+`JUDGE_SAMPLE=60` faz o juiz avaliar só 60 das 150 respostas: uma amostra estratificada por
+categoria e **a mesma para todos os modelos**. F1, busca, custo e latência continuam medidos
+nas 150.
+
+### Piloto e validação humana do juiz
+
+Antes das rodadas completas:
+
+```bash
+make pilot MODEL=claude-sonnet-5-5 YES=1   # 10 avaliações fora do gold set
+make judge-agreement                        # depois de dar as suas notas
+```
+
+O piloto roda em avaliações **fora** do gold set, para não influenciar a rotulagem. Ele mede o
+custo real e projeta o custo das rodadas completas. Também gera
+`data/judge_validation/<rodada>/to_score.csv`, onde uma pessoa dá notas às mesmas respostas, às
+cegas (sem ver as notas do juiz), com a mesma rubrica. O `make judge-agreement` mede a
+concordância contra um critério de aprovação definido antes de existir qualquer nota.
 
 ## Resultados
 

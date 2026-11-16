@@ -184,3 +184,137 @@ def test_cli_explains_missing_gold_set(monkeypatch, tmp_path):
     monkeypatch.setattr("sys.argv", ["eval", "retrieval", "--gold", str(tmp_path / "gold.csv")])
     with pytest.raises(SystemExit, match="gold-check"):
         evaluation.main()
+
+
+# --- Amostra do juiz -------------------------------------------------------------------
+
+
+def test_judge_sample_is_stratified_exact_and_deterministic():
+    from reviews_triage.evaluation import judge_sample_ids
+
+    gold = make_synthetic_gold(per_class=25)  # 150, 25 por categoria
+    ids = judge_sample_ids(gold, 60)
+
+    assert len(ids) == 60
+    counts = gold[gold["review_id"].isin(ids)]["categoria"].value_counts()
+    assert set(counts) == {10}  # 60/150 de 25 = 10 por categoria
+    assert judge_sample_ids(gold, 60) == ids  # mesma amostra em toda rodada
+    assert judge_sample_ids(gold, None) is None and judge_sample_ids(gold, 500) is None
+
+
+def test_judge_sample_allocation_sums_exactly_with_unbalanced_categories():
+    from reviews_triage.evaluation import judge_sample_ids
+
+    gold = make_synthetic_gold(per_class=25)
+    unbalanced = gold[~((gold["categoria"] == "outro") & (gold.index % 3 == 0))]
+    for size in (7, 31, 60):
+        assert len(judge_sample_ids(unbalanced, size)) == size
+
+
+def test_execute_run_judges_only_the_sample_and_records_it(gold, tmp_path: Path):
+    df, path = gold  # 60 avaliações
+    agent, judge = agent_and_judge()
+
+    execute_run(
+        df,
+        df,
+        agent,
+        judge,
+        "claude-sonnet-5-5",
+        "low",
+        path,
+        reports_dir=tmp_path,
+        workers=2,
+        judge_sample=12,
+    )
+
+    meta, summary = load_run(next((tmp_path / "runs").iterdir()))
+    assert summary["juiz"]["n"] == 12 and summary["n"] == 60
+    assert meta.judge_sample_size == 12 and meta.judge_sample_sha != "todas"
+    assert summary["juiz"]["aderencia"]["ci95"] is not None
+    assert (
+        estimate_cost("claude-sonnet-5-5", 150, 60)[1] < estimate_cost("claude-sonnet-5-5", 150)[1]
+    )
+
+
+def test_comparison_flags_different_judge_samples(gold, tmp_path: Path):
+    df, path = gold
+    for sample in (12, 24):
+        agent, judge = agent_and_judge()
+        execute_run(
+            df,
+            df,
+            agent,
+            judge,
+            "claude-sonnet-5-5",
+            "low",
+            path,
+            reports_dir=tmp_path / str(sample),
+            workers=2,
+            judge_sample=sample,
+        )
+    runs = [load_run(next((tmp_path / str(s) / "runs").iterdir())) for s in (12, 24)]
+    assert "amostra do juiz" in render_comparison(runs)
+
+
+# --- Piloto ----------------------------------------------------------------------------
+
+
+def clean_reviews(per_score: int = 40) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"review_id": f"c{s}_{i}", "review_score": s, "text": f"Avaliação {s} número {i}"}
+            for s in range(1, 6)
+            for i in range(per_score)
+        ]
+    )
+
+
+def test_pilot_never_uses_reviews_from_the_gold_set(tmp_path: Path):
+    from reviews_triage.evaluation import pilot_sample
+    from reviews_triage.gold import build_gold_sample
+
+    reviews = clean_reviews()
+    future_gold = set(build_gold_sample(reviews)["review_id"])  # o que `make gold` vai sortear
+    already_labeled = tmp_path / "to_label.csv"
+    pool = reviews[~reviews["review_id"].isin(future_gold)]
+    pool.head(3).assign(categoria="", urgencia="").to_csv(already_labeled, index=False)
+
+    sample = pilot_sample(reviews, 10, [already_labeled, tmp_path / "gold.csv"])
+
+    assert len(sample) == 10
+    assert sample["review_score"].value_counts().to_dict() == {s: 2 for s in range(1, 6)}
+    assert not set(sample["review_id"]) & future_gold
+    assert not set(sample["review_id"]) & set(pool.head(3)["review_id"])
+    with pytest.raises(ValueError, match="múltiplo de 5"):
+        pilot_sample(reviews, 7, [])
+
+
+def test_pilot_report_measures_cost_and_hides_judge_scores(tmp_path: Path):
+    from reviews_triage.evaluation import execute_pilot, find_runs
+    from reviews_triage.judge_validation import export_for_scoring
+
+    sample = clean_reviews(per_score=2)
+    agent, judge = agent_and_judge()
+
+    report, run_dir = execute_pilot(
+        sample,
+        agent,
+        judge,
+        "claude-sonnet-5-5",
+        "low",
+        reports_dir=tmp_path,
+        validation_dir=tmp_path / "val",
+    )
+    scoring = export_for_scoring(run_dir, out_dir=tmp_path / "val")
+
+    text = report.read_text(encoding="utf-8")
+    assert "## Custo medido" in text and "Projeção das rodadas completas" in text
+    assert all(m in text for m in ("claude-opus-5-5", "claude-haiku-5-5", "Três rodadas"))
+    assert "Segue a política." not in text  # justificativa do juiz (FakeLLM) não vaza
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert "juiz" not in summary and summary["custo"]["juiz_tokens"]["chamadas"] == 10
+    meta, _ = load_run(run_dir)
+    assert meta.kind == "pilot" and meta.run_id.endswith("_piloto")
+    assert find_runs(kind="gold", runs_dir=tmp_path / "runs") == []  # compare ignora pilotos
+    assert str(scoring) in text or scoring.name in text

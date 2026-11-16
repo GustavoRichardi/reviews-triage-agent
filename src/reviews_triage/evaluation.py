@@ -1,11 +1,11 @@
 """Avaliação do agente no gold set (Fase 5).
 
 Uso:
-    make eval-retrieval                          # só a busca, sem LLM (custo zero)
-    make eval MODEL=claude-sonnet-5-5 LIMIT=10   # mostra a estimativa de custo e PARA
-    make eval MODEL=claude-sonnet-5-5 LIMIT=10 YES=1   # piloto: mede o custo real
-    make eval MODEL=claude-sonnet-5-5 YES=1      # rodada completa
-    make eval-compare                            # compara as rodadas salvas (sem LLM)
+    make eval-retrieval                        # só a busca, sem LLM (custo zero)
+    make pilot MODEL=claude-sonnet-5-5         # piloto fora do gold set: estimativa e PARA
+    make pilot MODEL=claude-sonnet-5-5 YES=1   # piloto pago: mede o custo real
+    make eval MODEL=claude-sonnet-5-5 JUDGE_SAMPLE=60 YES=1   # rodada completa
+    make eval-compare                          # compara as rodadas salvas (sem LLM)
 
 Cada rodada grava em reports/runs/<run_id>/:
     meta.json      configuração (modelo, juiz, hashes dos prompts, gold set, commit)
@@ -33,8 +33,9 @@ from sklearn.metrics import confusion_matrix, f1_score
 
 from reviews_triage import baseline
 from reviews_triage.agent import MAX_REDRAFTS, TOP_K, TriageAgent, build_query
-from reviews_triage.gold import GOLD_PATH, load_gold
-from reviews_triage.judge import JUDGE_EFFORT, JUDGE_MODEL, Judge, JudgeScores
+from reviews_triage.data import RAW_PATH, clean, load_raw
+from reviews_triage.gold import GOLD_PATH, TO_LABEL_PATH, build_gold_sample, load_gold, read_labels
+from reviews_triage.judge import CRITERIA, JUDGE_EFFORT, JUDGE_MODEL, Judge, JudgeScores
 from reviews_triage.labels import CATEGORIES
 from reviews_triage.llm import AnthropicLLM, LLMRefusal
 from reviews_triage.policy import (
@@ -50,6 +51,9 @@ RUNS_DIR = REPORTS_DIR / "runs"
 N_BOOTSTRAP = 1000
 SEED = 42
 NO_ANSWER = "sem_resposta"  # predição quando o agente falhou ou o modelo recusou
+PILOT_SEED = 7
+VALIDATION_DIR = Path("data/judge_validation")
+CANDIDATE_MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 # Preço em US$ por milhão de tokens (entrada, saída), tabela pública da Anthropic.
 # Modelo sem preço aqui gera erro, para nunca reportar custo zero por engano.
@@ -62,7 +66,7 @@ PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 # Estimativa grosseira de tokens por avaliação, só para o aviso antes de gastar.
-# O número real sai de uma rodada piloto (LIMIT=10).
+# O número real sai do piloto (`make pilot`).
 EST_AGENT_TOKENS = (5_000, 1_000)
 EST_JUDGE_TOKENS = (3_500, 800)
 
@@ -93,14 +97,17 @@ class RunMeta(BaseModel):
     embedding_model: str
     top_k: int
     max_redrafts: int
+    kind: str = "gold"  # "gold" (rodada no gold set) ou "pilot" (fora do gold set)
+    judge_sample_size: int | None = None  # None = o juiz avalia todas
+    judge_sample_sha: str = "todas"  # identifica o conjunto exato de avaliações julgadas
 
 
 class EvalRecord(BaseModel):
     review_id: str
     review_score: int
     text: str
-    gold_categoria: str
-    gold_urgencia: str
+    gold_categoria: str | None = None  # None no piloto (fora do gold set, sem rótulo)
+    gold_urgencia: str | None = None
     result: TriageResult | None = None
     latency_s: float | None = None
     error: str | None = None
@@ -119,8 +126,9 @@ def call_cost(call: LLMCall) -> float:
     return (call.input_tokens * price_in + call.output_tokens * price_out) / 1_000_000
 
 
-def estimate_cost(model: str, n_reviews: int) -> tuple[float, float]:
+def estimate_cost(model: str, n_reviews: int, n_judged: int | None = None) -> tuple[float, float]:
     """(agente, juiz) em US$, pela estimativa grosseira de tokens."""
+    n_judged = n_reviews if n_judged is None else n_judged
 
     def cost(m: str, tokens: tuple[int, int]) -> float:
         return call_cost(
@@ -129,21 +137,19 @@ def estimate_cost(model: str, n_reviews: int) -> tuple[float, float]:
             )
         )
 
-    return n_reviews * cost(model, EST_AGENT_TOKENS), n_reviews * cost(
-        JUDGE_MODEL, EST_JUDGE_TOKENS
-    )
+    return n_reviews * cost(model, EST_AGENT_TOKENS), n_judged * cost(JUDGE_MODEL, EST_JUDGE_TOKENS)
 
 
 # --- Execução --------------------------------------------------------------------------
 
 
-def evaluate_one(row, agent: TriageAgent, judge: Judge) -> EvalRecord:
+def evaluate_one(row, agent: TriageAgent, judge: Judge, judge_this: bool = True) -> EvalRecord:
     record = EvalRecord(
         review_id=row.review_id,
         review_score=int(row.review_score),
         text=row.text,
-        gold_categoria=row.categoria,
-        gold_urgencia=row.urgencia,
+        gold_categoria=getattr(row, "categoria", None) or None,
+        gold_urgencia=getattr(row, "urgencia", None) or None,
     )
     started = time.perf_counter()
     try:
@@ -153,7 +159,7 @@ def evaluate_one(row, agent: TriageAgent, judge: Judge) -> EvalRecord:
         return record
     record.latency_s = time.perf_counter() - started
 
-    if record.result.resposta_sugerida:
+    if judge_this and record.result.resposta_sugerida:
         try:
             record.judge, record.judge_call = judge.score(
                 row.text, int(row.review_score), record.result.resposta_sugerida
@@ -171,12 +177,19 @@ def run_eval(
     judge: Judge,
     workers: int = 4,
     on_record: Callable[[EvalRecord], None] | None = None,
+    judge_ids: set[str] | None = None,
 ) -> list[EvalRecord]:
-    """Roda agente + juiz em cada avaliação, em paralelo (as chamadas são I/O)."""
+    """Roda agente + juiz em cada avaliação, em paralelo (as chamadas são I/O).
+    `judge_ids` restringe o juiz a uma amostra; None = julga todas."""
     order = {review_id: i for i, review_id in enumerate(gold["review_id"])}
     records = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(evaluate_one, row, agent, judge) for row in gold.itertuples()]
+        futures = [
+            pool.submit(
+                evaluate_one, row, agent, judge, judge_ids is None or row.review_id in judge_ids
+            )
+            for row in gold.itertuples()
+        ]
         for future in as_completed(futures):
             record = future.result()
             records.append(record)
@@ -228,6 +241,72 @@ def _rate(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
+def bootstrap_mean_ci(values: list[float], n: int = N_BOOTSTRAP, seed: int = SEED):
+    """IC de 95% da média por bootstrap (None com menos de 2 valores)."""
+    if len(values) < 2:
+        return None
+    arr = np.asarray(values, dtype=float)
+    means = arr[np.random.default_rng(seed).integers(0, len(arr), (n, len(arr)))].mean(axis=1)
+    return [float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))]
+
+
+def judge_sample_ids(gold: pd.DataFrame, size: int | None, seed: int = SEED) -> set[str] | None:
+    """Avaliações que o juiz vai julgar (None = todas).
+
+    Estratificada por categoria (cotas proporcionais, sobra para os maiores restos) e com
+    seed fixa, calculada sobre o gold set INTEIRO: é o mesmo conjunto para todos os modelos
+    e para qualquer LIMIT, então as notas do juiz comparam as mesmas avaliações.
+    """
+    if size is None or size >= len(gold):
+        return None
+    counts = gold["categoria"].value_counts().sort_index()  # ordem fixa desempata os restos
+    quotas = counts * size / len(gold)
+    alloc = np.floor(quotas).astype(int)
+    leftovers = (quotas - alloc).sort_values(ascending=False, kind="stable")
+    alloc[leftovers.index[: size - int(alloc.sum())]] += 1
+    ids: set[str] = set()
+    for category, n in alloc.items():
+        group = gold[gold["categoria"] == category]
+        ids |= set(group.sample(n=int(n), random_state=seed)["review_id"])
+    return ids
+
+
+def ids_sha(ids: set[str] | None) -> str:
+    return (
+        "todas" if ids is None else hashlib.sha256("\n".join(sorted(ids)).encode()).hexdigest()[:8]
+    )
+
+
+def pilot_sample(
+    clean_reviews: pd.DataFrame, n: int, gold_files: list[Path], seed: int = PILOT_SEED
+) -> pd.DataFrame:
+    """Avaliações do piloto: FORA do gold set e estratificadas por nota como ele.
+
+    Fora porque você vai ler as respostas do agente para dar notas ao juiz; se fossem do
+    gold set, isso influenciaria a rotulagem delas depois. A exclusão cobre o gold set que
+    `make gold` vai sortear (o sorteio é determinístico), os arquivos já gerados e textos
+    idênticos. Estratificadas porque reclamações (notas 1-2) custam mais que elogios.
+    """
+    if n <= 0 or n % 5:
+        raise ValueError(
+            "O piloto precisa de um múltiplo de 5 avaliações (o mesmo número por nota)."
+        )
+    future_gold = build_gold_sample(clean_reviews)  # mesmos parâmetros de `make gold`
+    excluded_ids = set(future_gold["review_id"])
+    excluded_texts = set(future_gold["text"].str.lower())
+    for path in gold_files:
+        if path.exists():
+            existing = read_labels(path)
+            excluded_ids |= set(existing["review_id"])
+            excluded_texts |= set(existing["text"].str.lower())
+    pool = clean_reviews[
+        ~clean_reviews["review_id"].isin(excluded_ids)
+        & ~clean_reviews["text"].str.lower().isin(excluded_texts)
+    ]
+    sample = build_gold_sample(pool, per_score=n // 5, seed=seed)
+    return sample[["review_id", "review_score", "text"]]
+
+
 def retrieval_hit_rates(gold: pd.DataFrame, index: PolicyIndex, k: int = TOP_K) -> dict:
     """Hit rate da busca sem chamar LLM, com e sem a dica de categoria (hipótese D31).
 
@@ -250,8 +329,89 @@ def retrieval_hit_rates(gold: pd.DataFrame, index: PolicyIndex, k: int = TOP_K) 
     return out
 
 
+def operational_metrics(records: list[EvalRecord]) -> dict:
+    """Métricas que não dependem de rótulo: revisão, custo, tokens e latência."""
+    done = [r for r in records if r.result is not None]
+    reasons = [" | ".join(r.result.motivos_escalacao) for r in done]
+    agent_costs = [sum(call_cost(c) for c in r.result.llm_calls) for r in done]
+    judge_calls = [r.judge_call for r in records if r.judge_call]
+    latencies = [r.latency_s for r in done if r.latency_s is not None]
+    by_step: dict[str, list[LLMCall]] = {}
+    for r in done:
+        for c in r.result.llm_calls:
+            by_step.setdefault(c.step, []).append(c)
+    all_calls = [c for calls in by_step.values() for c in calls] + judge_calls
+
+    def outcome(attempts: int) -> float | None:
+        hits = sum(
+            r.result.tentativas_redacao == attempts and _approved(m)
+            for r, m in zip(done, reasons, strict=True)
+        )
+        return _rate(hits, len(done))
+
+    return {
+        "n": len(records),
+        "n_errors": sum(r.error is not None for r in records),
+        "n_judge_errors": sum(r.judge_error is not None for r in records),
+        "revisao": {
+            "aprovada_1a": outcome(1),
+            "aprovada_2a": outcome(2),
+            "reprovada": _rate(sum("reprovou" in m for m in reasons), len(done)),
+            "escalada": _rate(sum(r.result.escalate_to_human for r in done), len(done)),
+            "escalada_urgencia": _rate(sum("urgência alta" in m for m in reasons), len(done)),
+            "recusas": sum("recusou" in m for m in reasons),
+        },
+        "custo": {
+            "agente_por_avaliacao": float(np.mean(agent_costs)) if agent_costs else None,
+            "agente_por_1000": float(np.mean(agent_costs)) * 1000 if agent_costs else None,
+            "agente_total": float(sum(agent_costs)),
+            "juiz_total": sum(call_cost(c) for c in judge_calls),
+            "juiz_por_avaliacao_julgada": (
+                float(np.mean([call_cost(c) for c in judge_calls])) if judge_calls else None
+            ),
+            "juiz_tokens": (
+                {
+                    "chamadas": len(judge_calls),
+                    "entrada_media": float(np.mean([c.input_tokens for c in judge_calls])),
+                    "saida_media": float(np.mean([c.output_tokens for c in judge_calls])),
+                }
+                if judge_calls
+                else None
+            ),
+            "cache_tokens": sum(c.cache_read_tokens + c.cache_write_tokens for c in all_calls),
+            "tokens_por_passo": {
+                step: {
+                    "chamadas_por_avaliacao": len(calls) / len(done),
+                    "entrada_media": float(np.mean([c.input_tokens for c in calls])),
+                    "saida_media": float(np.mean([c.output_tokens for c in calls])),
+                }
+                for step, calls in by_step.items()
+            },
+        },
+        "latencia_s": {
+            "p50": float(np.percentile(latencies, 50)) if latencies else None,
+            "p95": float(np.percentile(latencies, 95)) if latencies else None,
+            "media": float(np.mean(latencies)) if latencies else None,
+        },
+    }
+
+
+def judge_metrics(records: list[EvalRecord]) -> dict:
+    judged = [r.judge for r in records if r.judge is not None]
+    out: dict = {"n": len(judged)}
+    for criterion in CRITERIA:
+        scores = [getattr(j, criterion) for j in judged]
+        out[criterion] = {
+            "mean": float(np.mean(scores)) if scores else None,
+            "ci95": bootstrap_mean_ci(scores),
+            "dist": {str(s): scores.count(s) for s in range(1, 6)},
+        }
+    out["aderencia_baixa_pct"] = _rate(sum(j.aderencia <= 2 for j in judged), len(judged))
+    return out
+
+
 def compute_metrics(records: list[EvalRecord], baseline_pred: pd.Series, baseline_cv: dict) -> dict:
-    """Todas as métricas da rodada, em tipos simples (vira summary.json)."""
+    """Todas as métricas de uma rodada no gold set, em tipos simples (vira summary.json)."""
     ids = [r.review_id for r in records]
     y_true = np.array([r.gold_categoria for r in records])
     y_agent = np.array(
@@ -278,37 +438,14 @@ def compute_metrics(records: list[EvalRecord], baseline_pred: pd.Series, baselin
     )
     true_high, pred_high = u_true == "alta", u_pred == "alta"
 
-    done = [r for r in records if r.result is not None]
-    reasons = [" | ".join(r.result.motivos_escalacao) for r in done]
-
     hits = [
         any(f.split("#")[0] in EXPECTED_SOURCES[r.gold_categoria] for f in r.result.fontes)
-        for r in done
-        if r.result.fontes
+        for r in records
+        if r.result is not None and r.result.fontes
     ]
 
-    judged = [r.judge for r in records if r.judge is not None]
-    judge = {}
-    for criterion in ("aderencia", "tom", "utilidade"):
-        scores = [getattr(j, criterion) for j in judged]
-        judge[criterion] = {
-            "mean": float(np.mean(scores)) if scores else None,
-            "dist": {str(s): scores.count(s) for s in range(1, 6)},
-        }
-    judge["aderencia_baixa_pct"] = _rate(sum(j.aderencia <= 2 for j in judged), len(judged))
-
-    agent_costs = [sum(call_cost(c) for c in r.result.llm_calls) for r in done]
-    judge_cost = sum(call_cost(r.judge_call) for r in records if r.judge_call)
-    latencies = [r.latency_s for r in done if r.latency_s is not None]
-    by_step: dict[str, list[LLMCall]] = {}
-    for r in done:
-        for c in r.result.llm_calls:
-            by_step.setdefault(c.step, []).append(c)
-
     return {
-        "n": len(records),
-        "n_errors": sum(r.error is not None for r in records),
-        "n_judge_errors": sum(r.judge_error is not None for r in records),
+        **operational_metrics(records),
         "categoria": {
             "agent_f1_macro": _f1(y_true, y_agent, labels),
             "agent_f1_ci95": boot["a"],
@@ -329,49 +466,7 @@ def compute_metrics(records: list[EvalRecord], baseline_pred: pd.Series, baselin
             "n_alta_gold": int(true_high.sum()),
         },
         "busca": {f"hit@{TOP_K}_agente": _rate(sum(hits), len(hits))},
-        "revisao": {
-            "aprovada_1a": _rate(
-                sum(
-                    r.result.tentativas_redacao == 1 and _approved(m)
-                    for r, m in zip(done, reasons, strict=True)
-                ),
-                len(done),
-            ),
-            "aprovada_2a": _rate(
-                sum(
-                    r.result.tentativas_redacao == 2 and _approved(m)
-                    for r, m in zip(done, reasons, strict=True)
-                ),
-                len(done),
-            ),
-            "reprovada": _rate(sum("reprovou" in m for m in reasons), len(done)),
-            "escalada": _rate(sum(r.result.escalate_to_human for r in done), len(done)),
-            "escalada_urgencia": _rate(sum("urgência alta" in m for m in reasons), len(done)),
-            "recusas": sum("recusou" in m for m in reasons),
-        },
-        "juiz": judge,
-        "custo": {
-            "agente_por_avaliacao": float(np.mean(agent_costs)) if agent_costs else None,
-            "agente_por_1000": float(np.mean(agent_costs)) * 1000 if agent_costs else None,
-            "juiz_total": judge_cost,
-            "agente_total": float(sum(agent_costs)),
-            "cache_tokens": sum(
-                c.cache_read_tokens + c.cache_write_tokens for cs in by_step.values() for c in cs
-            ),
-            "tokens_por_passo": {
-                step: {
-                    "chamadas_por_avaliacao": len(calls) / len(done),
-                    "entrada_media": float(np.mean([c.input_tokens for c in calls])),
-                    "saida_media": float(np.mean([c.output_tokens for c in calls])),
-                }
-                for step, calls in by_step.items()
-            },
-        },
-        "latencia_s": {
-            "p50": float(np.percentile(latencies, 50)) if latencies else None,
-            "p95": float(np.percentile(latencies, 95)) if latencies else None,
-            "media": float(np.mean(latencies)) if latencies else None,
-        },
+        "juiz": judge_metrics(records),
     }
 
 
@@ -392,6 +487,62 @@ def _table(header: list[str], rows: list[list]) -> str:
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
     return "\n".join(lines)
+
+
+def _mean_ci(stats: dict) -> str:
+    """Média do juiz com o IC 95% do bootstrap, ex.: "4.20 [3.95, 4.43]"."""
+    if stats["mean"] is None:
+        return "—"
+    ci = stats.get("ci95")
+    return f"{stats['mean']:.2f}" + (f" [{ci[0]:.2f}, {ci[1]:.2f}]" if ci else "")
+
+
+def _review_table(rev: dict) -> str:
+    return _table(
+        ["Desfecho", "%"],
+        [
+            ["Aprovada no 1º rascunho", _fmt(rev["aprovada_1a"], pct=True)],
+            ["Aprovada no 2º rascunho", _fmt(rev["aprovada_2a"], pct=True)],
+            ["Reprovada duas vezes (escala)", _fmt(rev["reprovada"], pct=True)],
+            ["Escalada por urgência alta", _fmt(rev["escalada_urgencia"], pct=True)],
+            ["Recusas do modelo (n)", rev["recusas"]],
+        ],
+    )
+
+
+def _steps_table(cost: dict) -> str:
+    rows = [
+        [
+            s,
+            _fmt(v["chamadas_por_avaliacao"], digits=2),
+            f"{v['entrada_media']:.0f}",
+            f"{v['saida_media']:.0f}",
+        ]
+        for s, v in cost["tokens_por_passo"].items()
+    ]
+    if cost.get("juiz_tokens"):
+        jt = cost["juiz_tokens"]
+        rows.append(
+            [
+                "juiz (só na avaliação)",
+                "1 por avaliação julgada",
+                f"{jt['entrada_media']:.0f}",
+                f"{jt['saida_media']:.0f}",
+            ]
+        )
+    return _table(
+        ["Passo", "Chamadas por avaliação", "Tokens de entrada (média)", "Tokens de saída (média)"],
+        rows,
+    )
+
+
+def _judge_sample_desc(meta: RunMeta) -> str:
+    if meta.judge_sample_size is None:
+        return "todas as avaliações"
+    return (
+        f"amostra de {meta.judge_sample_size} estratificada por categoria "
+        f"(conjunto `{meta.judge_sample_sha}`, o mesmo em todas as rodadas)"
+    )
 
 
 def render_run_report(meta: RunMeta, metrics: dict, records: list[EvalRecord]) -> str:
@@ -422,9 +573,9 @@ def render_run_report(meta: RunMeta, metrics: dict, records: list[EvalRecord]) -
                 f"Busca: hit@{meta.top_k} (documento esperado entre as fontes)",
                 _fmt(metrics["busca"][f"hit@{meta.top_k}_agente"], pct=True),
             ],
-            ["Juiz: aderência à política (1–5)", _fmt(jz["aderencia"]["mean"], digits=2)],
-            ["Juiz: tom (1–5)", _fmt(jz["tom"]["mean"], digits=2)],
-            ["Juiz: utilidade (1–5)", _fmt(jz["utilidade"]["mean"], digits=2)],
+            ["Juiz: aderência à política (1–5, IC 95%)", _mean_ci(jz["aderencia"])],
+            ["Juiz: tom (1–5, IC 95%)", _mean_ci(jz["tom"])],
+            ["Juiz: utilidade (1–5, IC 95%)", _mean_ci(jz["utilidade"])],
             ["Respostas com aderência ≤ 2", _fmt(jz["aderencia_baixa_pct"], pct=True)],
             ["Escaladas para humano", _fmt(rev["escalada"], pct=True)],
             ["Custo do agente por avaliação (US$)", _fmt(cost["agente_por_avaliacao"], digits=5)],
@@ -458,34 +609,11 @@ def render_run_report(meta: RunMeta, metrics: dict, records: list[EvalRecord]) -
         ],
     )
     judge_dist = _table(
-        ["Critério", "1", "2", "3", "4", "5", "Média"],
-        [
-            [c, *jz[c]["dist"].values(), _fmt(jz[c]["mean"], digits=2)]
-            for c in ("aderencia", "tom", "utilidade")
-        ],
+        ["Critério", "1", "2", "3", "4", "5", "Média (IC 95%)"],
+        [[c, *jz[c]["dist"].values(), _mean_ci(jz[c])] for c in CRITERIA],
     )
-    review = _table(
-        ["Desfecho", "%"],
-        [
-            ["Aprovada no 1º rascunho", _fmt(rev["aprovada_1a"], pct=True)],
-            ["Aprovada no 2º rascunho", _fmt(rev["aprovada_2a"], pct=True)],
-            ["Reprovada duas vezes (escala)", _fmt(rev["reprovada"], pct=True)],
-            ["Escalada por urgência alta", _fmt(rev["escalada_urgencia"], pct=True)],
-            ["Recusas do modelo (n)", rev["recusas"]],
-        ],
-    )
-    steps = _table(
-        ["Passo", "Chamadas por avaliação", "Tokens de entrada (média)", "Tokens de saída (média)"],
-        [
-            [
-                s,
-                _fmt(v["chamadas_por_avaliacao"], digits=2),
-                f"{v['entrada_media']:.0f}",
-                f"{v['saida_media']:.0f}",
-            ]
-            for s, v in cost["tokens_por_passo"].items()
-        ],
-    )
+    review = _review_table(rev)
+    steps = _steps_table(cost)
 
     worst = sorted(
         (r for r in records if r.judge), key=lambda r: (r.judge.aderencia, r.judge.utilidade)
@@ -568,6 +696,8 @@ O agente acertou o documento esperado em {hit_agent} dos casos (consulta = dica 
 
 ## Juiz (LLM-as-judge)
 
+{jz["n"]} respostas julgadas: {_judge_sample_desc(meta)}.
+
 {judge_dist}
 
 ### As 5 respostas com pior aderência
@@ -597,7 +727,7 @@ def render_comparison(runs: list[tuple[RunMeta, dict]]) -> str:
                 f"{_fmt(cat['agent_f1_macro'])} {_ci(cat['agent_f1_ci95'])}",
                 _fmt(m["urgencia"]["alta_recall"], pct=True),
                 _fmt(m["busca"][f"hit@{meta.top_k}_agente"], pct=True),
-                _fmt(jz["aderencia"]["mean"], digits=2),
+                _mean_ci(jz["aderencia"]),
                 _fmt(jz["tom"]["mean"], digits=2),
                 _fmt(jz["utilidade"]["mean"], digits=2),
                 _fmt(m["revisao"]["escalada"], pct=True),
@@ -630,7 +760,7 @@ def render_comparison(runs: list[tuple[RunMeta, dict]]) -> str:
             "F1 macro (IC 95%)",
             "Recall urgência alta",
             "hit@3",
-            "Aderência",
+            "Aderência (IC 95%)",
             "Tom",
             "Utilidade",
             "Escaladas",
@@ -646,6 +776,7 @@ def render_comparison(runs: list[tuple[RunMeta, dict]]) -> str:
         "gold set": lambda m: m.gold_sha,
         "modelo do juiz": lambda m: (m.judge_model, m.judge_effort),
         "rubrica do juiz": lambda m: m.judge_prompt_version,
+        "amostra do juiz": lambda m: m.judge_sample_sha,
         "prompts do agente": lambda m: tuple(sorted(m.prompt_versions.items())),
         "n de avaliações": lambda m: m.n_reviews,
     }
@@ -686,25 +817,15 @@ def git_commit() -> str:
         return "desconhecido"
 
 
-def execute_run(
-    gold: pd.DataFrame,
-    full_gold: pd.DataFrame,
-    agent: TriageAgent,
-    judge: Judge,
-    model: str,
-    effort: str,
-    gold_path: Path,
-    reports_dir: Path = REPORTS_DIR,
-    workers: int = 4,
-    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
-) -> Path:
-    """Roda, salva os resultados brutos, calcula as métricas e escreve o relatório."""
+def _new_meta(
+    agent: TriageAgent, judge: Judge, model: str, effort: str, embedding_model: str, **fields
+) -> RunMeta:
     if model == JUDGE_MODEL:
         raise ValueError(f"O juiz ({JUDGE_MODEL}) não pode avaliar o próprio modelo.")
-
     now = datetime.now()
-    meta = RunMeta(
-        run_id=f"{now:%Y-%m-%d_%H%M%S}_{model}",
+    suffix = "_piloto" if fields.get("kind") == "pilot" else ""
+    return RunMeta(
+        run_id=f"{now:%Y-%m-%d_%H%M%S}_{model}{suffix}",
         created_at=now.isoformat(timespec="seconds"),
         model=model,
         effort=effort,
@@ -712,14 +833,23 @@ def execute_run(
         judge_effort=JUDGE_EFFORT,
         judge_prompt_version=judge.version,
         prompt_versions=agent.prompt_versions,
-        gold_path=str(gold_path),
-        gold_sha=file_sha(gold_path),
-        n_reviews=len(gold),
         git_commit=git_commit(),
         embedding_model=embedding_model,
         top_k=TOP_K,
         max_redrafts=MAX_REDRAFTS,
+        **fields,
     )
+
+
+def _run_and_save(
+    meta: RunMeta,
+    reviews: pd.DataFrame,
+    agent: TriageAgent,
+    judge: Judge,
+    reports_dir: Path,
+    workers: int,
+    judge_ids: set[str] | None,
+) -> tuple[Path, list[EvalRecord]]:
     run_dir = reports_dir / "runs" / meta.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "meta.json").write_text(meta.model_dump_json(indent=2), encoding="utf-8")
@@ -735,13 +865,46 @@ def execute_run(
             fh.write(record.model_dump_json() + "\n")
             fh.flush()
             done += 1
-            if done % 10 == 0 or done == len(gold):
-                print(f"  {done}/{len(gold)}", file=sys.stderr)
+            if done % 10 == 0 or done == len(reviews):
+                print(f"  {done}/{len(reviews)}", file=sys.stderr)
 
-        records = run_eval(gold, agent, judge, workers=workers, on_record=save)
-    results_path.write_text(  # reescreve na ordem do gold set
+        records = run_eval(
+            reviews, agent, judge, workers=workers, on_record=save, judge_ids=judge_ids
+        )
+    results_path.write_text(  # reescreve na ordem de entrada
         "".join(r.model_dump_json() + "\n" for r in records), encoding="utf-8"
     )
+    return run_dir, records
+
+
+def execute_run(
+    gold: pd.DataFrame,
+    full_gold: pd.DataFrame,
+    agent: TriageAgent,
+    judge: Judge,
+    model: str,
+    effort: str,
+    gold_path: Path,
+    reports_dir: Path = REPORTS_DIR,
+    workers: int = 4,
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    judge_sample: int | None = None,
+) -> Path:
+    """Roda no gold set, salva os resultados brutos, calcula as métricas e escreve o relatório."""
+    judge_ids = judge_sample_ids(full_gold, judge_sample)
+    meta = _new_meta(
+        agent,
+        judge,
+        model,
+        effort,
+        embedding_model,
+        gold_path=str(gold_path),
+        gold_sha=file_sha(gold_path),
+        n_reviews=len(gold),
+        judge_sample_size=None if judge_ids is None else len(judge_ids),
+        judge_sample_sha=ids_sha(judge_ids),
+    )
+    run_dir, records = _run_and_save(meta, gold, agent, judge, reports_dir, workers, judge_ids)
 
     base = baseline.evaluate(full_gold)
     base_pred = pd.Series(base["predictions"].to_numpy(), index=full_gold["review_id"])
@@ -759,10 +922,184 @@ def execute_run(
     return report
 
 
+# --- Piloto ----------------------------------------------------------------------------
+
+
+def project_round_cost(ops: dict, model: str, n_reviews: int, n_judged: int) -> tuple[float, float]:
+    """(agente, juiz) de uma rodada, com os tokens medidos no piloto e o preço de `model`."""
+    price_in, price_out = PRICES_PER_MTOK[model]
+    per_review = (
+        sum(
+            s["chamadas_por_avaliacao"]
+            * (s["entrada_media"] * price_in + s["saida_media"] * price_out)
+            for s in ops["custo"]["tokens_por_passo"].values()
+        )
+        / 1_000_000
+    )
+    jt = ops["custo"]["juiz_tokens"]
+    judge_in, judge_out = PRICES_PER_MTOK[JUDGE_MODEL]
+    per_judged = (
+        (jt["entrada_media"] * judge_in + jt["saida_media"] * judge_out) / 1_000_000 if jt else 0.0
+    )
+    return n_reviews * per_review, n_judged * per_judged
+
+
+def render_pilot_report(meta: RunMeta, ops: dict, scoring_path: Path, gold_size: int = 150) -> str:
+    cost, lat = ops["custo"], ops["latencia_s"]
+    est_agent, est_judge = estimate_cost(meta.model, 1)
+    measured = _table(
+        ["Por avaliação (US$)", "Estimado antes", "Medido no piloto"],
+        [
+            ["Agente", f"{est_agent:.4f}", _fmt(cost["agente_por_avaliacao"], digits=4)],
+            [
+                "Juiz (por avaliação julgada)",
+                f"{est_judge:.4f}",
+                _fmt(cost["juiz_por_avaliacao_julgada"], digits=4),
+            ],
+            [
+                "Agente por 1.000 avaliações",
+                f"{est_agent * 1000:.2f}",
+                _fmt(cost["agente_por_1000"], digits=2),
+            ],
+        ],
+    )
+
+    rows, totals = [], {150: [0.0, 0.0], 60: [0.0, 0.0]}
+    for model in CANDIDATE_MODELS:
+        agent_cost, judge_full = project_round_cost(ops, model, gold_size, gold_size)
+        _, judge_60 = project_round_cost(ops, model, gold_size, 60)
+        totals[150][0] += agent_cost + judge_full
+        totals[60][0] += agent_cost + judge_60
+        source = "medido" if model == meta.model else f"projeção com tokens do {meta.model}"
+        rows.append(
+            [
+                f"`{model}` ({source})",
+                f"{agent_cost:.2f}",
+                f"{judge_full:.2f}",
+                f"**{agent_cost + judge_full:.2f}**",
+                f"{judge_60:.2f}",
+                f"**{agent_cost + judge_60:.2f}**",
+            ]
+        )
+    rows.append(
+        ["**Três rodadas**", "", "", f"**{totals[150][0]:.2f}**", "", f"**{totals[60][0]:.2f}**"]
+    )
+    projection = _table(
+        [
+            "Modelo",
+            "Agente (150)",
+            "Juiz (150)",
+            "Total, juiz em 150",
+            "Juiz (60)",
+            "Total, juiz em 60",
+        ],
+        rows,
+    )
+
+    return f"""# Piloto: {meta.model}
+
+- **Rodada:** `{meta.run_id}` ({meta.created_at}, commit `{meta.git_commit}`)
+- **Avaliações:** {meta.n_reviews}, **fora do gold set**, estratificadas por nota
+  (conjunto `{meta.gold_sha}`)
+- **Agente:** `{meta.model}`, effort `{meta.effort}`; **juiz:** `{meta.judge_model}`,
+  effort `{meta.judge_effort}`, rubrica `{meta.judge_prompt_version}`
+- **Preços:** tabela da Anthropic de {PRICES_AS_OF}
+- Erros do agente: {ops["n_errors"]}. Erros do juiz: {ops["n_judge_errors"]}.
+
+> 🔒 **As notas do juiz não aparecem neste relatório, de propósito.** Você vai dar notas às
+> mesmas respostas sem conhecê-las (validação cega). Não abra o `results.jsonl` desta rodada
+> antes de terminar.
+
+## Custo medido
+
+{measured}
+
+Total gasto neste piloto: US$ {cost["agente_total"] + cost["juiz_total"]:.4f}
+(agente {cost["agente_total"]:.4f} + juiz {cost["juiz_total"]:.4f}).
+
+## Tokens por passo
+
+{_steps_table(cost)}
+
+## Latência
+
+p50 {_fmt(lat["p50"], digits=1)} s, p95 {_fmt(lat["p95"], digits=1)} s por avaliação
+(com várias avaliações em paralelo).
+
+## Revisão e escalonamento
+
+{_review_table(ops["revisao"])}
+
+## Projeção das rodadas completas ({gold_size} avaliações, US$)
+
+{projection}
+
+Para `{meta.model}` a projeção usa tokens medidos; para os outros modelos, usa os mesmos tokens
+com o preço de cada um. É uma aproximação: modelos diferentes geram quantidades diferentes de
+tokens de saída, sobretudo de raciocínio. Com {meta.n_reviews} avaliações a média de tokens
+também tem incerteza.
+
+## Próximo passo: validação humana do juiz
+
+Dê notas às respostas em `{scoring_path}` seguindo `prompts/judge.md` e salve como
+`human.csv` na mesma pasta; depois rode `make judge-agreement`.
+"""
+
+
+def execute_pilot(
+    sample: pd.DataFrame,
+    agent: TriageAgent,
+    judge: Judge,
+    model: str,
+    effort: str,
+    reports_dir: Path = REPORTS_DIR,
+    validation_dir: Path = VALIDATION_DIR,
+    workers: int = 4,
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+) -> tuple[Path, Path]:
+    """Piloto fora do gold set: mede custo e latência e prepara a validação do juiz."""
+    meta = _new_meta(
+        agent,
+        judge,
+        model,
+        effort,
+        embedding_model,
+        kind="pilot",
+        gold_path="piloto: avaliações fora do gold set",
+        gold_sha=ids_sha(set(sample["review_id"])),
+        n_reviews=len(sample),
+    )
+    run_dir, records = _run_and_save(meta, sample, agent, judge, reports_dir, workers, None)
+    ops = operational_metrics(records)  # sem notas do juiz: a validação é cega
+    (run_dir / "summary.json").write_text(
+        json.dumps(ops, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    scoring_path = validation_dir / meta.run_id / "to_score.csv"
+    report = reports_dir / f"pilot_{meta.run_id}.md"
+    report.write_text(render_pilot_report(meta, ops, scoring_path), encoding="utf-8")
+    return report, run_dir
+
+
 def load_run(run_dir: Path) -> tuple[RunMeta, dict]:
     meta = RunMeta.model_validate_json((run_dir / "meta.json").read_text(encoding="utf-8"))
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     return meta, summary
+
+
+def load_records(run_dir: Path) -> list[EvalRecord]:
+    lines = (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+    return [EvalRecord.model_validate_json(line) for line in lines if line.strip()]
+
+
+def find_runs(kind: str | None = None, runs_dir: Path = RUNS_DIR) -> list[Path]:
+    """Rodadas completas (com summary.json), da mais antiga para a mais nova."""
+    found = []
+    for run_dir in sorted(runs_dir.glob("*")):
+        if (run_dir / "summary.json").exists():
+            meta, _ = load_run(run_dir)
+            if kind is None or meta.kind == kind:
+                found.append(run_dir)
+    return found
 
 
 # --- CLI -------------------------------------------------------------------------------
@@ -774,29 +1111,45 @@ def _require_gold(path: Path) -> pd.DataFrame:
     return load_gold(path)
 
 
-def _cmd_run(args: argparse.Namespace) -> None:
-    model = args.model or os.environ.get("ANTHROPIC_MODEL", "")
+def _resolve_model(arg: str | None) -> str:
+    model = arg or os.environ.get("ANTHROPIC_MODEL", "")
     if not model:
-        sys.exit("Informe o modelo: make eval MODEL=claude-sonnet-5-5")
+        sys.exit("Informe o modelo: MODEL=claude-sonnet-5-5")
     if model == JUDGE_MODEL:
         sys.exit(f"O juiz ({JUDGE_MODEL}) não pode avaliar o próprio modelo.")
+    return model
+
+
+def _print_estimate(model: str, n_reviews: int, n_judged: int, yes: bool) -> bool:
+    agent_cost, judge_cost = estimate_cost(model, n_reviews, n_judged)
+    print(
+        f"{n_reviews} avaliações com {model}; juiz ({JUDGE_MODEL}) em {n_judged}.\n"
+        f"Estimativa GROSSEIRA: agente ~US$ {agent_cost:.2f} + juiz ~US$ {judge_cost:.2f} "
+        f"= ~US$ {agent_cost + judge_cost:.2f}."
+    )
+    if not yes:
+        print("Nada foi executado. Para rodar, repita com YES=1 (ou --yes).")
+    return yes
+
+
+def _real_agent_and_judge(model: str) -> tuple[TriageAgent, Judge, str, str]:
+    effort = os.environ.get("ANTHROPIC_EFFORT") or "low"
+    embedding_model = os.environ.get("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
+    agent = TriageAgent(AnthropicLLM(model=model, effort=effort), build_index())
+    judge = Judge(AnthropicLLM(model=JUDGE_MODEL, effort=JUDGE_EFFORT), load_chunks())
+    return agent, judge, effort, embedding_model
+
+
+def _cmd_run(args: argparse.Namespace) -> None:
+    model = _resolve_model(args.model)
     full_gold = _require_gold(args.gold)
     gold = full_gold.head(args.limit) if args.limit else full_gold
-
-    agent_cost, judge_cost = estimate_cost(model, len(gold))
-    print(
-        f"{len(gold)} avaliações com {model} (juiz: {JUDGE_MODEL}).\n"
-        f"Estimativa GROSSEIRA: agente ~US$ {agent_cost:.2f} + juiz ~US$ {judge_cost:.2f} "
-        f"= ~US$ {agent_cost + judge_cost:.2f}. Uma rodada piloto (LIMIT=10) mede o valor real."
-    )
-    if not args.yes:
-        print("Nada foi executado. Para rodar, repita com YES=1 (ou --yes).")
+    judge_ids = judge_sample_ids(full_gold, args.judge_sample)
+    n_judged = len(gold) if judge_ids is None else int(gold["review_id"].isin(judge_ids).sum())
+    if not _print_estimate(model, len(gold), n_judged, args.yes):
         return
 
-    effort = os.environ.get("ANTHROPIC_EFFORT") or "low"
-    index = build_index()
-    agent = TriageAgent(AnthropicLLM(model=model, effort=effort), index)
-    judge = Judge(AnthropicLLM(model=JUDGE_MODEL, effort=JUDGE_EFFORT), load_chunks())
+    agent, judge, effort, embedding_model = _real_agent_and_judge(model)
     report = execute_run(
         gold,
         full_gold,
@@ -806,17 +1159,36 @@ def _cmd_run(args: argparse.Namespace) -> None:
         effort,
         args.gold,
         workers=args.workers,
-        embedding_model=os.environ.get("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL,
+        embedding_model=embedding_model,
+        judge_sample=args.judge_sample,
     )
     print(f"Relatório em {report}")
 
 
-def _cmd_compare(args: argparse.Namespace) -> None:
-    run_dirs = [Path(p) for p in args.runs] or sorted(
-        p for p in RUNS_DIR.glob("*") if (p / "summary.json").exists()
+def _cmd_pilot(args: argparse.Namespace) -> None:
+    model = _resolve_model(args.model)
+    if not args.raw.exists():
+        sys.exit(f"{args.raw} não encontrado. Baixe o dataset da Olist (ver README).")
+    sample = pilot_sample(clean(load_raw(args.raw)), args.n, [TO_LABEL_PATH, GOLD_PATH])
+    print(f"Piloto com {len(sample)} avaliações fora do gold set ({args.n // 5} por nota).")
+    if not _print_estimate(model, len(sample), len(sample), args.yes):
+        return
+
+    agent, judge, effort, embedding_model = _real_agent_and_judge(model)
+    report, run_dir = execute_pilot(
+        sample, agent, judge, model, effort, workers=args.workers, embedding_model=embedding_model
     )
+    # Import aqui: judge_validation importa este módulo (evita import circular).
+    from reviews_triage.judge_validation import export_for_scoring
+
+    scoring = export_for_scoring(run_dir)
+    print(f"Relatório do piloto em {report}\nArquivo para suas notas: {scoring}")
+
+
+def _cmd_compare(args: argparse.Namespace) -> None:
+    run_dirs = [Path(p) for p in args.runs] or find_runs(kind="gold")  # pilotos ficam de fora
     if not run_dirs:
-        sys.exit(f"Nenhuma rodada encontrada em {RUNS_DIR}.")
+        sys.exit(f"Nenhuma rodada no gold set encontrada em {RUNS_DIR}.")
     out = REPORTS_DIR / f"compare_{datetime.now():%Y-%m-%d_%H%M%S}.md"
     out.write_text(render_comparison([load_run(p) for p in run_dirs]), encoding="utf-8")
     print(f"Comparação em {out}")
@@ -838,7 +1210,18 @@ def main() -> None:
     run.add_argument("--limit", type=int)
     run.add_argument("--workers", type=int, default=4)
     run.add_argument("--yes", action="store_true", help="confirma o gasto com a API")
+    run.add_argument(
+        "--judge-sample", type=int, help="julga só N avaliações (amostra fixa por categoria)"
+    )
     run.set_defaults(func=_cmd_run)
+
+    pilot = sub.add_parser("pilot", help="piloto fora do gold set: custo real + validação do juiz")
+    pilot.add_argument("--model")
+    pilot.add_argument("--n", type=int, default=10, help="múltiplo de 5 (mesmo número por nota)")
+    pilot.add_argument("--raw", type=Path, default=RAW_PATH)
+    pilot.add_argument("--workers", type=int, default=4)
+    pilot.add_argument("--yes", action="store_true", help="confirma o gasto com a API")
+    pilot.set_defaults(func=_cmd_pilot)
 
     compare = sub.add_parser("compare", help="tabela comparando rodadas salvas")
     compare.add_argument("runs", nargs="*")

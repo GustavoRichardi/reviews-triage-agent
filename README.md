@@ -144,13 +144,15 @@ Antes das rodadas completas:
 
 ```bash
 make pilot MODEL=claude-sonnet-5-5 YES=1   # 30 avaliações fora do gold set
-make judge-agreement                        # depois de dar as suas notas
+make judge-score                            # você dá as notas no terminal, às cegas
+make judge-agreement                        # concordância e kappa (publicados abaixo)
 ```
 
 O piloto roda em avaliações **fora** do gold set, para não influenciar a rotulagem. Ele mede o
 custo real e projeta o custo das rodadas completas. Também gera
-`data/judge_validation/<rodada>/to_score.csv`, onde uma pessoa dá notas às mesmas respostas, às
-cegas (sem ver as notas do juiz), com a mesma rubrica. O `make judge-agreement` mede a
+`data/judge_validation/<rodada>/to_score.csv`, e o `make judge-score` mostra uma resposta por vez
+para uma pessoa dar as notas às cegas (sem ver as do juiz), com a mesma rubrica e a mesma
+política que o juiz recebe. O `make judge-agreement` mede a
 concordância contra um critério de aprovação definido antes de existir qualquer nota.
 
 ## Resultados

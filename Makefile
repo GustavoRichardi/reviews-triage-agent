@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare pilot judge-export judge-agreement prelabel gold-review gold-report readme
+.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare pilot judge-export judge-score judge-agreement prelabel gold-review gold-report readme
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -57,6 +57,9 @@ pilot: ## Piloto fora do gold set: custo real + arquivo para validar o juiz (MOD
 
 judge-export: ## Gera o CSV para você dar notas às cegas (RUN=reports/runs/<rodada>; padrão: último piloto)
 	uv run python -m reviews_triage.judge_validation export $(if $(RUN),--run $(RUN),)
+
+judge-score: ## Você dá as notas às respostas do piloto no terminal, às cegas (RUN=...; padrão: último piloto)
+	uv run python -m reviews_triage.judge_validation score $(if $(RUN),--run $(RUN),)
 
 judge-agreement: ## Concordância juiz × suas notas (RUN=...; padrão: último piloto)
 	uv run python -m reviews_triage.judge_validation agreement $(if $(RUN),--run $(RUN),)

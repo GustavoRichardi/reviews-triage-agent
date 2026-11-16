@@ -529,6 +529,7 @@ Mais recentes no fim.
   revisão humana estava protegendo a avaliação contra erros correlacionados.
 - **Custo:** ~30 decisões feitas do zero, em vez de 30 confirmações (~10 minutos a mais).
   `--blind 0` desliga, mas aí o relatório não consegue separar acerto de ancoragem.
+- **Confirmado** pelo usuário: amostra cega de 30 mantida.
 - **Descartado:** só o modo revisão (sem como medir a ancoragem).
 
 ### D57. Ferramenta de revisão no terminal
@@ -549,3 +550,26 @@ Mais recentes no fim.
 - **Por quê:** número copiado à mão envelhece e erra. Gerado a partir do relatório salvo, cada
   número do README tem origem rastreável. Um veredito sem o kappa esconderia o quanto o juiz
   passou ou falhou.
+
+### D59. Notas humanas do juiz numa ferramenta de terminal, vendo o mesmo que o juiz
+- **O quê:** `make judge-score` mostra uma resposta do piloto por vez (nota do cliente,
+  avaliação, resposta) e pede as três notas de uma vez ("534" = aderência 5, tom 3,
+  utilidade 4). `?` mostra a rubrica e `p` mostra a política, nos dois casos o texto exato que o
+  juiz recebe. Salva a cada resposta em `human.csv` e retoma de onde parou; o
+  `make judge-agreement` recusa rodar com notas faltando.
+- **Por quê:** menos trabalho e menos erro de digitação do que preencher a planilha, e
+  **simetria**: humano e juiz julgam com a mesma informação. A ferramenta não mostra as fontes
+  que o agente recuperou (o juiz também não as vê) nem nada do juiz.
+- **Descartado:** editar `to_score.csv` numa planilha (continua funcionando, mas é mais lento).
+
+### D60. `CLAUDE.md` com as regras do projeto e o roteiro de execução
+- **O quê:** a sequência da Fase 5 roda numa sessão do Claude Code no computador do usuário, que
+  começa sem o histórico desta conversa. O `CLAUDE.md` (lido automaticamente pelo Claude Code)
+  registra as regras de trabalho, a regra de custo (estimativa antes de toda chamada paga e
+  espera do ok), as invariantes de método (juiz e critério congelados, validação cega,
+  nenhum rótulo escrito pela IA) e o roteiro passo a passo.
+- **Por quê:** essas proteções só existiam na conversa. Sem elas escritas, uma sessão nova poderia,
+  com boa intenção, ler o `results.jsonl` do piloto e mostrar as notas do juiz antes da validação
+  cega, ou "consertar" o teste que congela a rubrica.
+- **Descartado:** só um roteiro no README (o README é para quem lê o projeto, não instruções
+  para o agente).

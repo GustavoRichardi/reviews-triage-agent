@@ -15,7 +15,6 @@ Comandos: v volta uma avaliação · ? ajuda · q sai (o progresso é salvo a ca
 
 import argparse
 import json
-import os
 import sys
 from collections import Counter
 from collections.abc import Callable
@@ -27,8 +26,10 @@ from reviews_triage.gold import GOLD_PATH, TO_LABEL_PATH, read_labels
 from reviews_triage.labels import CATEGORIES, URGENCIES
 from reviews_triage.prelabel import PRELABELS_META_PATH, PRELABELS_PATH
 from reviews_triage.stats import kappa, wilson_interval
+from reviews_triage.terminal import Back, Quit, ask_command, write_csv_atomic
 
 BLIND_SIZE = 30
+KEEP_OR_SWAP = "  Enter mantém o seu · t troca pela sugestão · ou corrija > "
 BLIND_SEED = 11
 REPORT_PATH = Path("reports/gold_labeling.md")
 STATS_PATH = Path("reports/gold_labeling.json")
@@ -59,14 +60,6 @@ t      troca pelo rótulo sugerido (só depois de ver a sugestão no modo cego)
 -- ... observação livre, ex.: "3a -- atrasou e quebrou"
 v  volta uma avaliação   ?  esta ajuda   q  sai (o progresso fica salvo)
 """
-
-
-class Quit(Exception):
-    pass
-
-
-class Back(Exception):
-    pass
 
 
 def parse_answer(text: str, categoria: str | None, urgencia: str | None):
@@ -126,22 +119,7 @@ def build_rows(
 
 
 def save_rows(rows: list[dict], path: Path = GOLD_PATH) -> None:
-    tmp = path.with_suffix(".tmp")
-    pd.DataFrame(rows, columns=GOLD_COLUMNS).to_csv(tmp, index=False, encoding="utf-8-sig")
-    os.replace(tmp, path)  # troca atômica: um Ctrl+C no meio não corrompe o arquivo
-
-
-def _ask(ask: Callable[[str], str], prompt: str) -> str:
-    try:
-        answer = ask(prompt)
-    except (EOFError, KeyboardInterrupt):
-        raise Quit from None
-    command = answer.strip().lower()
-    if command == "q":
-        raise Quit
-    if command == "v":
-        raise Back
-    return answer
+    write_csv_atomic(rows, GOLD_COLUMNS, path)
 
 
 def _label(categoria: str, urgencia: str) -> str:
@@ -164,7 +142,7 @@ def review_one(row: dict, position: str, ask, say) -> None:
         start, prompt = (None, None), "Seu rótulo (ex.: 3a) · ? ajuda > "
 
     while True:
-        answer = _ask(ask, prompt)
+        answer = ask_command(ask, prompt)
         if answer.strip() == "?":
             say(HELP)
             continue
@@ -181,7 +159,7 @@ def review_one(row: dict, position: str, ask, say) -> None:
         else:
             say(f"  O LLM sugeriu: {_label(*suggestion)}\n  Motivo: {row['justificativa_llm']}")
             while True:
-                answer = _ask(ask, "  Enter mantém o seu · t troca pela sugestão · ou corrija > ")
+                answer = ask_command(ask, KEEP_OR_SWAP)
                 if answer.strip().lower() == "t":
                     categoria, urgencia = suggestion
                     break

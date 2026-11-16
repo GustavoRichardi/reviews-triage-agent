@@ -2,7 +2,7 @@
 
 Fluxo:
     make pilot MODEL=... YES=1  -> gera data/judge_validation/<rodada>/to_score.csv
-    (você dá notas seguindo prompts/judge.md e salva como human.csv na mesma pasta)
+    make judge-score            -> você dá as notas no terminal (grava human.csv na mesma pasta)
     make judge-agreement        -> reports/judge_agreement_<rodada>.md
 
 O arquivo para dar notas não traz nada do juiz (nem notas, nem justificativa): quem vê a
@@ -12,6 +12,8 @@ nota do juiz antes tende a concordar com ela, e a concordância medida sairia in
 import argparse
 import json
 import sys
+from collections.abc import Callable
+from itertools import groupby
 from pathlib import Path
 
 import numpy as np
@@ -28,8 +30,11 @@ from reviews_triage.evaluation import (
 )
 from reviews_triage.gold import read_labels
 from reviews_triage.judge import CRITERIA
+from reviews_triage.policy import load_chunks
+from reviews_triage.prompts import load_prompt
 from reviews_triage.readme import render_judge_block, update_readme
 from reviews_triage.stats import kappa, wilson_interval
+from reviews_triage.terminal import Back, Quit, ask_command, write_csv_atomic
 
 # Critério de aprovação PRÉ-REGISTRADO (DECISIONS.md, D52): definido antes de existir
 # qualquer nota humana, pelo mesmo motivo que a rubrica foi congelada antes de rodar.
@@ -241,6 +246,104 @@ que aconteceria por acaso; ele fica indefinido (—) quando as notas quase não 
 """
 
 
+# --- Notas humanas no terminal --------------------------------------------------------
+
+HUMAN_COLUMNS = [
+    "item",
+    "review_id",
+    "nota_cliente",
+    "avaliacao",
+    "resposta",
+    *CRITERIA,
+    "observacao",
+]
+SCORE_PROMPT = "Notas (aderência tom utilidade, ex.: 534) · p política · ? rubrica > "
+
+
+def rubric_text() -> str:
+    """Os três critérios de prompts/judge.md, exatamente como o juiz os recebe."""
+    text = load_prompt("judge")
+    return text[text.index("## aderencia") : text.index("## Saída")].strip()
+
+
+def policy_text() -> str:
+    """A política inteira, como o juiz a vê (sem as fontes que o agente recuperou)."""
+    parts = []
+    for title, group in groupby(load_chunks(), key=lambda c: c.title):
+        parts.append(f"# {title}\n" + "\n".join(f"- {c.section}: {c.text}" for c in group))
+    return "\n\n".join(parts)
+
+
+def parse_scores(text: str) -> tuple[dict[str, int], str]:
+    """'534', '5 3 4' ou '5,3,4' (+ '-- observação') -> notas por critério e observação."""
+    keys, _, note = text.partition("--")
+    digits = [ch for ch in keys if ch not in " ,;"]
+    if len(digits) != 3 or any(d not in SCORES for d in digits):
+        raise ValueError("digite 3 notas de 1 a 5, na ordem aderência, tom, utilidade (ex.: 534)")
+    return dict(zip(CRITERIA, map(int, digits), strict=True)), note.strip()
+
+
+def build_score_rows(to_score: pd.DataFrame, progress: pd.DataFrame | None) -> list[dict]:
+    saved = {} if progress is None else progress.set_index("review_id").to_dict("index")
+    rows = []
+    for record in to_score.to_dict("records"):
+        row = {c: str(record.get(c, "")) for c in HUMAN_COLUMNS}
+        previous = saved.get(row["review_id"])
+        if previous and all(str(previous.get(c, "")).strip() for c in CRITERIA):
+            row.update({c: str(previous.get(c, "")) for c in (*CRITERIA, "observacao")})
+        rows.append(row)
+    return rows
+
+
+def _scored(row: dict) -> bool:
+    return all(str(row[c]).strip() for c in CRITERIA)
+
+
+def score_loop(rows: list[dict], save: Callable[[list[dict]], None], ask=input, say=print) -> int:
+    """Uma resposta por vez. Nada do juiz aparece aqui: a validação é cega."""
+    say("Dê 3 notas de 1 a 5 (aderência, tom, utilidade) com a rubrica do juiz (? mostra).")
+    say("p mostra a política · -- adiciona observação · v volta · q sai (o progresso é salvo)")
+    i = 0
+    while i < len(rows):
+        row = rows[i]
+        if _scored(row):
+            i += 1
+            continue
+        say(f"\n[{i + 1}/{len(rows)}]  nota do cliente: {row['nota_cliente']}")
+        say(f'Avaliação: "{row["avaliacao"]}"')
+        say(f'Resposta:  "{row["resposta"]}"')
+        try:
+            while True:
+                answer = ask_command(ask, SCORE_PROMPT)
+                if answer.strip() == "?":
+                    say(rubric_text())
+                    continue
+                if answer.strip().lower() == "p":
+                    say(policy_text())
+                    continue
+                try:
+                    scores, note = parse_scores(answer)
+                    break
+                except ValueError as exc:
+                    say(f"  {exc}")
+        except Back:
+            i = max(0, i - 1)
+            for c in (*CRITERIA, "observacao"):
+                rows[i][c] = ""
+            save(rows)
+            continue
+        except Quit:
+            break
+        row.update({c: str(v) for c, v in scores.items()}, observacao=note)
+        save(rows)
+        i += 1
+    done = sum(_scored(r) for r in rows)
+    say(f"\n{done}/{len(rows)} com nota. Progresso salvo.")
+    if done == len(rows):
+        say("Pronto. Agora: make judge-agreement")
+    return done
+
+
 def _run_dir(arg: str | None) -> Path:
     if arg:
         return Path(arg)
@@ -253,7 +356,7 @@ def _run_dir(arg: str | None) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validação humana do juiz.")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("export", "agreement"):
+    for name in ("export", "score", "agreement"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--run", help="pasta da rodada em reports/runs (padrão: último piloto)")
     args = parser.parse_args()
@@ -264,8 +367,20 @@ def main() -> None:
         return
 
     human_path = VALIDATION_DIR / run_dir.name / "human.csv"
+    if args.command == "score":
+        to_score_path = VALIDATION_DIR / run_dir.name / "to_score.csv"
+        if not to_score_path.exists():
+            sys.exit(f"{to_score_path} não existe. Rode `make judge-export` primeiro.")
+        progress = read_labels(human_path) if human_path.exists() else None
+        rows = build_score_rows(read_labels(to_score_path), progress)
+        score_loop(rows, lambda r: write_csv_atomic(r, HUMAN_COLUMNS, human_path))
+        return
+
     if not human_path.exists():
-        sys.exit(f"{human_path} não existe. Dê as notas em to_score.csv e salve como human.csv.")
+        sys.exit(f"{human_path} não existe. Dê as notas com `make judge-score`.")
+    pending = [r for r in build_score_rows(read_labels(human_path), None) if not _scored(r)]
+    if pending:
+        sys.exit(f"Faltam notas em {len(pending)} respostas; continue com `make judge-score`.")
     result = agreement(load_records(run_dir), load_human_scores(human_path))
     meta, _ = load_run(run_dir)
     out = REPORTS_DIR / f"judge_agreement_{meta.run_id}.md"

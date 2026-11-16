@@ -171,3 +171,60 @@ def test_wilson_interval_is_honest_about_small_samples():
     narrow = wilson_interval(90, 100)
     assert narrow[1] - narrow[0] < high - low
     assert wilson_interval(0, 0) is None
+
+
+# --- Ferramenta de notas no terminal ---------------------------------------------------
+
+
+def scoring_session(pilot_run: Path, tmp_path: Path, answers: list[str], progress=None):
+    from reviews_triage.judge_validation import build_score_rows, score_loop
+
+    path = export_for_scoring(pilot_run, out_dir=tmp_path / "val")
+    rows = build_score_rows(
+        pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig"), progress
+    )
+    output, feed = [], iter(answers)
+    score_loop(rows, lambda r: None, ask=lambda _: next(feed), say=output.append)
+    return rows, "\n".join(output)
+
+
+def test_parse_scores_accepts_compact_and_spaced_forms():
+    from reviews_triage.judge_validation import parse_scores
+
+    assert parse_scores("534") == ({"aderencia": 5, "tom": 3, "utilidade": 4}, "")
+    assert parse_scores("5 3 4 -- prometeu cupom")[1] == "prometeu cupom"
+    assert parse_scores("5,3,4")[0]["utilidade"] == 4
+    for bad in ("53", "5346", "634", "abc", ""):
+        with pytest.raises(ValueError):
+            parse_scores(bad)
+
+
+def test_scoring_tool_records_scores_and_never_shows_the_judge(pilot_run: Path, tmp_path: Path):
+    answers = ["?", "p", "9", "543"] + ["444"] * 9
+    rows, output = scoring_session(pilot_run, tmp_path, answers)
+
+    assert [r["aderencia"] for r in rows] == ["5"] + ["4"] * 9
+    assert "## aderencia" in output and "Política de atraso na entrega" in output  # ? e p
+    assert "3 notas de 1 a 5" in output  # "9" foi rejeitado com explicação
+    assert "Cita o prazo certo." not in output  # justificativa do juiz nunca aparece
+    assert "make judge-agreement" in output
+
+
+def test_scoring_tool_goes_back_quits_and_resumes(pilot_run: Path, tmp_path: Path):
+    rows, _ = scoring_session(pilot_run, tmp_path, ["555", "111", "v", "222", "q"])
+    assert [r["aderencia"] for r in rows[:3]] == ["5", "2", ""]  # o "111" foi desfeito
+
+    progress = pd.DataFrame(rows)
+    rows, output = scoring_session(pilot_run, tmp_path / "again", ["333"] * 8, progress=progress)
+    assert "[3/10]" in output and "[1/10]" not in output
+    assert all(r["aderencia"] for r in rows)
+
+
+def test_rubric_shown_to_you_is_the_judges_rubric():
+    from reviews_triage.judge_validation import rubric_text
+    from reviews_triage.prompts import load_prompt
+
+    rubric = rubric_text()
+    assert rubric in load_prompt("judge")
+    assert all(f"## {c}" in rubric for c in ("aderencia", "tom", "utilidade"))
+    assert "Omitir não é violar" in rubric  # a v2

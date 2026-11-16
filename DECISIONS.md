@@ -88,3 +88,56 @@ Mais recentes no fim.
 - **Por quê:** o que exploramos é exatamente o que os modelos vão ver, e a lógica fica testada
   pelo pytest. Notebook com lógica própria tende a divergir do código de produção.
 - **Descartado:** fazer limpeza e análise juntas no notebook.
+
+## Fase 2 — Gold set
+
+### D12. 150 avaliações, estratificadas por nota (30 cada), sem textos repetidos
+- **O quê:** `groupby("review_score").sample(30)` sobre textos únicos (ignorando caixa).
+- **Por quê:** numa amostra aleatória as notas 5 dominariam e categorias de problema teriam
+  poucos exemplos. Com 80 avaliações seriam ~13 por categoria, o que deixa a validação cruzada
+  da Fase 3 com variância alta demais; 150 dá ~25 por categoria.
+- **Custo da escolha:** o gold set não tem a distribuição da produção (registrado nas
+  limitações do README). Métricas por classe e F1 macro continuam comparáveis; accuracy e
+  custo médio, não exatamente.
+- **Descartado:** amostra aleatória simples (poucos problemas) e estratificar pela categoria
+  (impossível: ela é justamente o que ainda não sabemos).
+
+### D13. Rotular categoria e urgência
+- **O quê:** colunas `categoria`, `urgencia` e `observacao` (livre).
+- **Por quê:** a urgência decide o que vai para um humano (`escalate_to_human`), é a decisão de
+  maior impacto no negócio. Sem rótulo, não daria para medir se o agente acerta a prioridade.
+- **Descartado:** rotular só categoria.
+
+### D14. Arquivo gerado (`to_label.csv`) separado do arquivo rotulado (`gold.csv`)
+- **O quê:** o script só escreve `to_label.csv` (e recusa sobrescrever sem `--force`); o
+  humano salva o resultado como `gold.csv`, que nenhum script escreve.
+- **Por quê:** horas de rotulagem manual não podem ser apagadas por um `make gold` rodado por
+  engano. Artefato gerado por máquina e artefato humano têm ciclos de vida diferentes.
+- **Descartado:** rotular direto em `to_label.csv`.
+
+### D15. Guia de rotulagem com regras de desempate
+- **O quê:** `data/gold/LABELING_GUIDE.md` com definição, exemplos e regras para casos com mais
+  de um problema.
+- **Por quê:** sem regra escrita, "atrasou e veio quebrado" recebe rótulos diferentes em dias
+  diferentes. O guia também vira a especificação do prompt de classificação na Fase 4, assim
+  humano e LLM seguem o mesmo critério.
+- **Descartado:** rotular "por intuição".
+
+### D16. Ordem embaralhada; a nota fica visível para quem rotula
+- **O quê:** as 150 linhas saem embaralhadas; `review_score` continua no arquivo.
+- **Por quê:** blocos de mesma nota induzem a rotular no piloto automático. A nota fica
+  visível porque faz parte da avaliação e o agente também a receberá em produção.
+- **Descartado:** esconder a nota (o humano teria menos contexto do que o próprio agente).
+
+### D17. Valores dos rótulos e colunas de rótulo em português
+- **O quê:** `categoria`/`urgencia` e valores como `atraso_entrega` ficam em português; o código
+  (funções, variáveis) segue em inglês.
+- **Por quê:** são dados de domínio e coincidem com o contrato da API (`categoria`, `urgencia`)
+  definido no escopo. Traduzir criaria um mapeamento a mais sem ganho.
+- **Descartado:** traduzir rótulos para inglês.
+
+### D18. Leitura tolerante a planilhas
+- **O quê:** o gerador grava UTF-8 com BOM; o leitor detecta `,` ou `;` e aceita BOM.
+- **Por quê:** o Excel em pt-BR só mostra acentos com BOM e salva CSV com `;`. Melhor o código
+  aceitar isso do que pedir para quem rotula configurar exportação.
+- **Descartado:** exigir um formato exato e falhar.

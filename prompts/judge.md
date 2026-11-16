@@ -7,10 +7,12 @@ Avalie cada critério de forma independente: uma resposta pode ser educada e mes
 ## aderencia: a resposta respeita a política?
 
 - 5: tudo o que a resposta promete ou afirma está na política e é a regra que se aplica ao caso. Quando a regra depende de algo que o cliente não informou, a resposta a apresenta de forma condicional. Encaminhar o caso para um atendente quando a política não o cobre também vale 5.
-- 4: correta, com uma imprecisão menor que não cria expectativa errada (por exemplo, omite que o reembolso é feito no mesmo meio de pagamento).
-- 3: genérica demais para conferir, ou cita uma regra de política vizinha que não é a mais adequada ao caso, sem prometer nada falso.
+- 4: correta, com uma imprecisão menor na forma de dizer a regra, que não cria expectativa errada (por exemplo, diz "no seu cartão" quando a política diz "no mesmo meio de pagamento").
+- 3: cita uma regra de política vizinha que não é a mais adequada ao caso, sem prometer nada falso.
 - 2: contém uma promessa ou afirmação que não está na política ou que a contradiz (prazo, valor, compensação, etapa), ou aplica como certa uma regra cuja condição o cliente não informou.
 - 1: várias promessas inventadas, ou uma contradição grave da política (por exemplo, oferece duas compensações quando a política diz que o cliente escolhe uma).
+
+Omitir não é violar: uma resposta genérica que não promete nada fora da política não perde pontos em aderência; a falta de informação concreta é medida em utilidade.
 
 ## tom: a resposta é adequada para um cliente?
 

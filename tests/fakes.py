@@ -6,6 +6,7 @@ import re
 
 from reviews_triage.judge import JudgeScores
 from reviews_triage.llm import LLMRefusal
+from reviews_triage.prelabel import PreLabel
 from reviews_triage.schemas import Classification, LLMCall, ReviewVerdict
 
 APPROVED = ReviewVerdict(aprovada=True, problemas=[])
@@ -59,6 +60,10 @@ class FakeLLM:
             return self.classification, call
         if step == "judge":
             return self.judge_scores, call
+        if step == "prelabel":
+            return PreLabel(
+                justificativa="Diz que não chegou.", categoria="atraso_entrega", urgencia="media"
+            ), call
         return self._next("review", self.verdicts), call
 
     def text(self, step, system, user):

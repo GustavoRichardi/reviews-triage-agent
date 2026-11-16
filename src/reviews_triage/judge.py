@@ -19,8 +19,9 @@ from reviews_triage.schemas import LLMCall
 # Fixo para todas as rodadas e diferente de todos os modelos comparados (Opus, Sonnet, Haiku).
 JUDGE_MODEL = "claude-fable-5-2"
 JUDGE_EFFORT = "medium"
-# Hash de prompts/judge.md no momento do congelamento, antes de qualquer rodada real.
-JUDGE_PROMPT_VERSION = "edf6a162"
+# Hash de prompts/judge.md congelado. v1 = edf6a162; v2 = c4a1e9c6 (aderência deixa de
+# punir omissão), trocada ANTES de qualquer rodada real (DECISIONS.md, D53).
+JUDGE_PROMPT_VERSION = "c4a1e9c6"
 
 Score = Literal[1, 2, 3, 4, 5]
 CRITERIA = ("aderencia", "tom", "utilidade")

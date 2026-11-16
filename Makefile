@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare pilot judge-export judge-agreement
+.PHONY: help install lint format test check data gold gold-check baseline policy-search triage eval eval-retrieval eval-compare pilot judge-export judge-agreement prelabel gold-review gold-report readme
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -52,7 +52,7 @@ eval: ## Avalia o agente no gold set (MODEL=..., JUDGE_SAMPLE=n, LIMIT=n; só ga
 eval-compare: ## Tabela comparando as rodadas salvas em reports/runs (sem LLM)
 	uv run python -m reviews_triage.evaluation compare $(RUNS)
 
-pilot: ## Piloto fora do gold set: custo real + arquivo para validar o juiz (MODEL=..., N=10; só gasta com YES=1)
+pilot: ## Piloto fora do gold set: custo real + arquivo para validar o juiz (MODEL=..., N=30; só gasta com YES=1)
 	uv run python -m reviews_triage.evaluation pilot $(if $(MODEL),--model $(MODEL),) $(if $(N),--n $(N),) $(if $(YES),--yes,)
 
 judge-export: ## Gera o CSV para você dar notas às cegas (RUN=reports/runs/<rodada>; padrão: último piloto)
@@ -60,3 +60,15 @@ judge-export: ## Gera o CSV para você dar notas às cegas (RUN=reports/runs/<ro
 
 judge-agreement: ## Concordância juiz × suas notas (RUN=...; padrão: último piloto)
 	uv run python -m reviews_triage.judge_validation agreement $(if $(RUN),--run $(RUN),)
+
+prelabel: ## Pré-rotula o gold set com claude-fable-5-2 (só gasta com YES=1)
+	uv run python -m reviews_triage.prelabel $(if $(YES),--yes,)
+
+gold-review: ## Revisão rápida dos rótulos, uma avaliação por vez (retoma de onde parou)
+	uv run python -m reviews_triage.review_labels review
+
+gold-report: ## % de sugestões corrigidas e concordância às cegas; publica no README
+	uv run python -m reviews_triage.review_labels report
+
+readme: ## Republica no README os números dos relatórios salvos
+	uv run python -m reviews_triage.readme

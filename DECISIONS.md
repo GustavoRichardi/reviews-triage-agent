@@ -344,7 +344,8 @@ Mais recentes no fim.
 
 ### D41. Rubrica do juiz congelada antes de qualquer rodada real
 - **O quê:** `prompts/judge.md` foi escrito e congelado com hash **`edf6a162`** antes de
-  qualquer execução com dados reais. O hash está em `JUDGE_PROMPT_VERSION`; o `Judge` se recusa
+  qualquer execução com dados reais. **Substituído pela v2 (`c4a1e9c6`), também antes de
+  qualquer rodada real: ver D53.** O hash está em `JUDGE_PROMPT_VERSION`; o `Judge` se recusa
   a rodar se o arquivo não bater, e um teste falha se a rubrica ou a configuração do juiz mudar.
 - **Por quê:** rubrica ajustada depois de ver os resultados vira métrica escolhida para parecer
   boa. Congelar antes torna a nota um compromisso prévio.
@@ -459,12 +460,13 @@ Mais recentes no fim.
 - **Limite:** com 10 respostas o resultado é indicativo, e o relatório avisa. Um piloto de
   10 tende a ter poucas respostas ruins, então mal testa se o juiz pega violações.
 
-### D52. Critério de aprovação do juiz pré-registrado (proposta, a confirmar)
+### D52. Critério de aprovação do juiz pré-registrado (confirmado)
 - **O quê:** por critério (aderência, tom, utilidade), o juiz é **aprovado** se: (1) pelo menos 80%
   das notas dele ficam a no máximo 1 ponto da humana; (2) o viés médio fica entre −0,5 e +0,5;
   (3) o kappa quadrático é pelo menos 0,40. É **inconclusivo** quando as notas não variam (kappa
   indefinido) e **reprovado** nos outros casos. As constantes ficam em `judge_validation.py`,
-  definidas antes de existir qualquer nota humana.
+  definidas antes de existir qualquer nota humana. **Confirmado** antes do piloto e antes de
+  qualquer nota humana. O README publica o kappa obtido por critério, não só o veredito.
 - **Por quê:** é a mesma lógica do congelamento da rubrica: critério escolhido depois de ver a
   concordância vira critério feito para passar. O kappa entrou depois que um teste com um juiz
   falso, que dá sempre a mesma nota, **passou** nos critérios (1) e (2): quando a maioria das
@@ -472,3 +474,78 @@ Mais recentes no fim.
   sempre e mesmo assim não detecta nada. O kappa dele é ~0.
 - **Descartado:** só concordância exata (rígida demais para uma escala de 5 pontos); só
   correlação (não detecta um juiz sistematicamente mais generoso).
+
+### D53. Rubrica do juiz v2, trocada ANTES de qualquer rodada real
+- **O quê:** a rubrica passou de `edf6a162` (v1) para **`c4a1e9c6`** (v2). Na `aderencia`, o
+  nível 3 deixou de incluir "genérica demais para conferir", o exemplo do nível 4 passou de
+  omissão ("omite que o reembolso é no mesmo meio de pagamento") para imprecisão ("diz 'no seu
+  cartão' quando a política diz 'no mesmo meio de pagamento'"), e entrou a frase "Omitir não é
+  violar...; a falta de informação concreta é medida em utilidade".
+- **Quando:** antes de qualquer execução real: nenhum piloto, nenhuma rodada, nenhuma nota do
+  juiz existia. A mudança veio de uma revisão da própria rubrica, não de resultado.
+- **Por quê:** na v1, uma resposta genérica perdia pontos em aderência **e** em utilidade, ou
+  seja, a mesma falha contava duas vezes, contrariando a instrução de avaliar os critérios de
+  forma independente. Também punia duas vezes a estratégia segura do agente (encaminhar sem
+  prometer nada). Na v2, aderência mede só o que está **dito errado**, que é o risco que o
+  passo `review` e o negócio querem controlar; a falta de informação fica em utilidade.
+- **Daqui em diante:** vale a regra da D41. Qualquer outra mudança na rubrica exige nova
+  entrada aqui e refazer todas as rodadas.
+
+### D54. Piloto com 30 avaliações
+- **O quê:** `make pilot` passa a usar N=30 por padrão (6 por nota).
+- **Por quê:** com 10 respostas, a validação do juiz é quase inútil: 9 de 10 de concordância
+  é compatível com ~60% real (IC de Wilson), e é provável que não haja respostas ruins
+  suficientes para testar se o juiz as detecta. 30 estreita o intervalo pelo custo estimado de
+  ~US$ 2,40.
+
+### D55. Gold set pré-rotulado por `claude-fable-5-2`, revisado por humano
+- **O quê:** `make prelabel` pede ao `claude-fable-5-2` (effort `medium`) categoria, urgência e
+  uma justificativa curta para cada uma das 150 avaliações. O prompt é `prompts/prelabel.md` com
+  as seções de critério do `LABELING_GUIDE.md` embutidas na hora de rodar; versão =
+  hash do prompt resultante (**`101fec44`** hoje), que muda se o prompt **ou** o guia mudarem.
+  As sugestões ficam em `data/gold/prelabels.csv` com custo e versão em `prelabels_meta.json`.
+  A pessoa revisa cada linha (`make gold-review`); só o rótulo revisado vale.
+- **Por quê:** reduz bastante o trabalho manual. Rotular do zero exige decidir; revisar
+  exige só conferir. O guia continua sendo a única especificação: humano e LLM seguem o mesmo
+  texto.
+- **Por que este modelo:** não é nenhum dos modelos avaliados como agente (Opus, Sonnet, Haiku
+  5.5) nem o baseline. É o mesmo modelo do juiz, mas para outra tarefa (rótulo de categoria, não
+  nota de resposta).
+- **Riscos assumidos:** ancoragem e circularidade (ver D56 e o README). Em particular, o Fable
+  e os agentes são todos Claude: o simples fato de ser "outro modelo" não elimina erros
+  correlacionados.
+- **Descartado:** rotulagem 100% manual (mais trabalho); pré-rotular com um dos modelos
+  avaliados (o agente seria medido contra os próprios rótulos).
+
+### D56. Amostra cega de 30 e diagnóstico de circularidade
+- **O quê:** 30 avaliações (6 por nota, seed fixa) são revisadas **às cegas**: a pessoa rotula sem
+  ver a sugestão, a sugestão aparece depois e ela decide se mantém ou troca. Ficam guardados os
+  dois rótulos (`categoria_cega` e o final). O relatório de avaliação mostra (1) com que
+  frequência o agente concorda com o pré-rótulo, (2) nos casos em que o humano corrigiu o LLM,
+  com que frequência o agente repetiu o mesmo erro, e (3) o F1 do agente no subconjunto cego.
+- **Por quê:** sem isso, o "% de sugestões corrigidas" é só um limite inferior da discordância
+  real, porque a sugestão ancora a revisão. A amostra cega dá a concordância LLM × humano sem
+  ancoragem, e a diferença entre as duas mede a ancoragem. O erro compartilhado mede quanto da
+  revisão humana estava protegendo a avaliação contra erros correlacionados.
+- **Custo:** ~30 decisões feitas do zero, em vez de 30 confirmações (~10 minutos a mais).
+  `--blind 0` desliga, mas aí o relatório não consegue separar acerto de ancoragem.
+- **Descartado:** só o modo revisão (sem como medir a ancoragem).
+
+### D57. Ferramenta de revisão no terminal
+- **O quê:** `make gold-review` mostra uma avaliação por vez. Enter aceita a sugestão; "3",
+  "a" ou "3a" corrigem a categoria e/ou a urgência; "-- texto" adiciona observação; `v`
+  volta; `q` sai. Salva a cada resposta (troca atômica do arquivo) e retoma de onde parou. A
+  ferramenta escreve `gold.csv`, mas só com decisões digitadas pela pessoa. A D14 continua
+  valendo: nenhum script gera rótulo sozinho nem apaga uma decisão já tomada (só o `v` desfaz).
+- **Por quê:** abrir uma planilha de 150 linhas com 12 colunas é lento e convida a erro de
+  digitação. Uma tecla por decisão e a validação na hora (só aceita rótulos válidos) eliminam os
+  erros que o `gold-check` pegaria depois.
+- **Descartado:** interface web (dependência e servidor para uma tarefa de 30 minutos).
+
+### D58. Resultados publicados no README a partir dos relatórios
+- **O quê:** o README tem blocos `<!-- auto:... -->` que `make gold-report`, `make
+  judge-agreement` e `make readme` reescrevem a partir dos JSONs em `reports/`. O bloco do juiz
+  publica o **kappa obtido** por critério, além do veredito.
+- **Por quê:** número copiado à mão envelhece e erra. Gerado a partir do relatório salvo, cada
+  número do README tem origem rastreável. Um veredito sem o kappa esconderia o quanto o juiz
+  passou ou falhou.

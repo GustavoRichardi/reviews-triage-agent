@@ -10,14 +10,12 @@ nota do juiz antes tende a concordar com ela, e a concordância medida sairia in
 """
 
 import argparse
-import math
+import json
 import sys
-import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import cohen_kappa_score
 
 from reviews_triage.evaluation import (
     REPORTS_DIR,
@@ -30,6 +28,8 @@ from reviews_triage.evaluation import (
 )
 from reviews_triage.gold import read_labels
 from reviews_triage.judge import CRITERIA
+from reviews_triage.readme import render_judge_block, update_readme
+from reviews_triage.stats import kappa, wilson_interval
 
 # Critério de aprovação PRÉ-REGISTRADO (DECISIONS.md, D52): definido antes de existir
 # qualquer nota humana, pelo mesmo motivo que a rubrica foi congelada antes de rodar.
@@ -108,24 +108,9 @@ def load_human_scores(path: Path) -> pd.DataFrame:
     return df
 
 
-def wilson_interval(successes: int, n: int, z: float = 1.96) -> list[float] | None:
-    """IC de 95% para uma proporção; funciona bem mesmo com n pequeno ou p perto de 0/1."""
-    if n == 0:
-        return None
-    p = successes / n
-    denom = 1 + z * z / n
-    center = (p + z * z / (2 * n)) / denom
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return [max(0.0, center - half), min(1.0, center + half)]
-
-
 def _weighted_kappa(human: np.ndarray, judge: np.ndarray) -> float | None:
-    """Kappa de Cohen com peso quadrático: desconta o acaso e pune mais as discordâncias
-    grandes. Indefinido (None) quando as notas quase não variam."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        kappa = cohen_kappa_score(human, judge, labels=[1, 2, 3, 4, 5], weights="quadratic")
-    return None if np.isnan(kappa) else float(kappa)
+    """Kappa quadrático: desconta o acaso e pune mais as discordâncias grandes."""
+    return kappa(human, judge, labels=[1, 2, 3, 4, 5], weights="quadratic")
 
 
 def agreement(records: list[EvalRecord], human: pd.DataFrame) -> dict:
@@ -285,6 +270,12 @@ def main() -> None:
     meta, _ = load_run(run_dir)
     out = REPORTS_DIR / f"judge_agreement_{meta.run_id}.md"
     out.write_text(render_agreement_report(meta.run_id, result), encoding="utf-8")
+    json_path = out.with_suffix(".json")
+    json_path.write_text(
+        json.dumps({"run_id": meta.run_id, "result": result}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    update_readme({"validacao-juiz": render_judge_block(result, meta.run_id)})
     for criterion, m in result["criterios"].items():
         kappa = m["kappa_quadratico"]
         print(
@@ -292,7 +283,7 @@ def main() -> None:
             f"viés {m['vies_juiz_menos_humano']:+.2f}  "
             f"kappa {'—' if kappa is None else f'{kappa:.2f}'}  {m['veredito'].upper()}"
         )
-    print(f"Relatório em {out}")
+    print(f"Relatório em {out}; README atualizado com o kappa.")
 
 
 if __name__ == "__main__":

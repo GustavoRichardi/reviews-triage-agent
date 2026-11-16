@@ -470,6 +470,51 @@ def compute_metrics(records: list[EvalRecord], baseline_pred: pd.Series, baselin
     }
 
 
+def label_source_diagnostics(records: list[EvalRecord], full_gold: pd.DataFrame) -> dict | None:
+    """Circularidade: o gold set foi pré-rotulado por um LLM (Claude), e o agente também é Claude.
+
+    - `erro_compartilhado`: nos casos em que o humano CORRIGIU o pré-rótulo, com que frequência o
+      agente previu o mesmo rótulo errado do LLM. Alto = erros correlacionados: sem a revisão
+      humana, esses erros teriam contado como acertos do agente.
+    - F1 no subconjunto cego: contra o rótulo que o humano deu SEM ver a sugestão, a medida
+      mais livre de influência do LLM (n pequeno, IC largo).
+    """
+    if "categoria_llm" not in full_gold.columns:
+        return None
+    gold = full_gold.set_index("review_id")
+    rows = [
+        (r.result.categoria or NO_ANSWER, gold.at[r.review_id, "categoria_llm"], r.gold_categoria)
+        for r in records
+        if r.result is not None and gold.at[r.review_id, "categoria_llm"]
+    ]
+    if not rows:
+        return None
+    corrected = [(agent, llm) for agent, llm, human in rows if llm != human]
+    out = {
+        "concorda_com_pre_rotulo": float(np.mean([a == llm for a, llm, _ in rows])),
+        "n_corrigidos": len(corrected),
+        "erro_compartilhado": (
+            float(np.mean([a == llm for a, llm in corrected])) if corrected else None
+        ),
+        "f1_cego": None,
+    }
+    if "categoria_cega" in gold.columns:
+        blind = [
+            r for r in records if r.result is not None and gold.at[r.review_id, "categoria_cega"]
+        ]
+        if blind:
+            y_blind = np.array([gold.at[r.review_id, "categoria_cega"] for r in blind])
+            y_final = np.array([r.gold_categoria for r in blind])
+            y_agent = np.array([r.result.categoria or NO_ANSWER for r in blind])
+            labels = [c for c in CATEGORIES if c in set(y_blind)]
+            out["f1_cego"] = {
+                "n": len(blind),
+                "contra_rotulo_cego": _f1(y_blind, y_agent, labels),
+                "contra_rotulo_final": _f1(y_final, y_agent, labels),
+            }
+    return out
+
+
 # --- Relatórios ------------------------------------------------------------------------
 
 
@@ -543,6 +588,29 @@ def _judge_sample_desc(meta: RunMeta) -> str:
         f"amostra de {meta.judge_sample_size} estratificada por categoria "
         f"(conjunto `{meta.judge_sample_sha}`, o mesmo em todas as rodadas)"
     )
+
+
+def _labels_section(diag: dict | None) -> str:
+    if not diag:
+        return ""
+    shared = diag["erro_compartilhado"]
+    blind = diag["f1_cego"]
+    blind_line = (
+        f"- F1 macro do agente no subconjunto cego (n = {blind['n']}): "
+        f"{blind['contra_rotulo_cego']:.3f} contra o seu rótulo às cegas, "
+        f"{blind['contra_rotulo_final']:.3f} contra o rótulo final.\n"
+        if blind
+        else ""
+    )
+    return f"""## Circularidade dos rótulos
+
+O gold set foi pré-rotulado por um LLM e revisado por humano (ver `reports/gold_labeling.md`).
+
+- O agente concorda com o pré-rótulo do LLM em {diag["concorda_com_pre_rotulo"]:.0%} dos casos.
+- Nos {diag["n_corrigidos"]} casos em que o humano corrigiu o pré-rótulo, o agente repetiu o erro
+  do LLM em **{_fmt(shared, pct=True)}**. Esses erros teriam virado "acertos" sem a revisão.
+{blind_line}
+"""
 
 
 def render_run_report(meta: RunMeta, metrics: dict, records: list[EvalRecord]) -> str:
@@ -704,6 +772,7 @@ O agente acertou o documento esperado em {hit_agent} dos casos (consulta = dica 
 
 {worst_table}
 
+{_labels_section(metrics.get("rotulos"))}
 ## Revisão e escalonamento
 
 {review}
@@ -913,6 +982,7 @@ def execute_run(
         records, base_pred, {"mean": float(f1s.mean()), "std": float(f1s.std())}
     )
     metrics["busca_sem_llm"] = retrieval_hit_rates(full_gold, agent.index)
+    metrics["rotulos"] = label_source_diagnostics(records, full_gold)
     (run_dir / "summary.json").write_text(
         json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -1217,7 +1287,7 @@ def main() -> None:
 
     pilot = sub.add_parser("pilot", help="piloto fora do gold set: custo real + validação do juiz")
     pilot.add_argument("--model")
-    pilot.add_argument("--n", type=int, default=10, help="múltiplo de 5 (mesmo número por nota)")
+    pilot.add_argument("--n", type=int, default=30, help="múltiplo de 5 (mesmo número por nota)")
     pilot.add_argument("--raw", type=Path, default=RAW_PATH)
     pilot.add_argument("--workers", type=int, default=4)
     pilot.add_argument("--yes", action="store_true", help="confirma o gasto com a API")

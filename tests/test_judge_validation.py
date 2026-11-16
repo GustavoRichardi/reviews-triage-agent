@@ -12,10 +12,10 @@ from reviews_triage.judge_validation import (
     export_for_scoring,
     load_human_scores,
     render_agreement_report,
-    wilson_interval,
 )
 from reviews_triage.policy import build_index, load_chunks
 from reviews_triage.schemas import TriageResult
+from reviews_triage.stats import wilson_interval
 
 INDEX = build_index(Path("docs/politicas"), embed=hash_embed)
 JUDGE = JudgeScores(justificativa="Cita o prazo certo.", aderencia=4, tom=5, utilidade=3)

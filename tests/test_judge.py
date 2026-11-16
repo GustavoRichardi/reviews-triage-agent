@@ -17,7 +17,7 @@ def test_judge_configuration_is_frozen():
     # Se este teste falhar, alguém mudou o juiz: as rodadas antigas deixam de ser comparáveis.
     # Só atualize as constantes junto com uma nova entrada no DECISIONS.md e rodando de novo
     # todos os modelos.
-    assert prompt_version(load_prompt("judge")) == JUDGE_PROMPT_VERSION == "edf6a162"
+    assert prompt_version(load_prompt("judge")) == JUDGE_PROMPT_VERSION == "c4a1e9c6"
     assert (JUDGE_MODEL, JUDGE_EFFORT) == ("claude-fable-5-2", "medium")
 
 

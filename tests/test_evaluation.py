@@ -114,7 +114,7 @@ def test_execute_run_writes_raw_results_metrics_and_report(gold, tmp_path: Path)
     meta, summary = load_run(run_dir)
     lines = (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == len(df) and json.loads(lines[0])["review_id"] == df["review_id"].iloc[0]
-    assert meta.judge_prompt_version == "edf6a162" and meta.judge_model == JUDGE_MODEL
+    assert meta.judge_prompt_version == "c4a1e9c6" and meta.judge_model == JUDGE_MODEL
     assert set(meta.prompt_versions) == {"classify", "draft", "review"}
 
     # Sempre "atraso" em 6 categorias balanceadas: accuracy de 1/6, urgência alta em tudo.
@@ -130,7 +130,7 @@ def test_execute_run_writes_raw_results_metrics_and_report(gold, tmp_path: Path)
         "## Busca de política",
         "## Juiz",
         "## Custo e tokens",
-        "edf6a162",
+        "c4a1e9c6",
     ]:
         assert section in text
 
@@ -318,3 +318,29 @@ def test_pilot_report_measures_cost_and_hides_judge_scores(tmp_path: Path):
     assert meta.kind == "pilot" and meta.run_id.endswith("_piloto")
     assert find_runs(kind="gold", runs_dir=tmp_path / "runs") == []  # compare ignora pilotos
     assert str(scoring) in text or scoring.name in text
+
+
+def test_circularity_diagnostics_count_errors_shared_with_the_prelabeler(tmp_path: Path):
+    from reviews_triage.evaluation import label_source_diagnostics
+
+    df = make_synthetic_gold(per_class=10)
+    # O LLM pré-rotulou tudo como "atraso_entrega"; o humano corrigiu o que não era atraso.
+    df["categoria_llm"] = "atraso_entrega"
+    df["categoria_cega"] = ""
+    df.loc[df.index[:12], "categoria_cega"] = df["categoria"].iloc[:12]
+    path = tmp_path / "gold.csv"
+    df.to_csv(path, index=False)
+    gold = load_gold(path)
+    always_atraso = Classification(
+        categoria="atraso_entrega", sentimento="negativo", urgencia="media"
+    )
+    agent, judge = agent_and_judge(classification=always_atraso)
+
+    records = run_eval(gold, agent, judge, workers=2)
+    diag = label_source_diagnostics(records, gold)
+
+    assert diag["concorda_com_pre_rotulo"] == 1.0
+    assert diag["n_corrigidos"] == 50  # 5 das 6 categorias não eram atraso
+    assert diag["erro_compartilhado"] == 1.0  # o agente repetiu todos os erros do LLM
+    assert diag["f1_cego"]["n"] == 12
+    assert label_source_diagnostics(records, gold.drop(columns=["categoria_llm"])) is None

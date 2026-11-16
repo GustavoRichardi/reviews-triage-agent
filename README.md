@@ -34,7 +34,7 @@ flowchart TD
   Chroma).
 - **draft** escreve a resposta usando só os trechos recuperados.
 - **review** reprova respostas que prometem algo fora da política; o rascunho volta com o
-  motivo, até 2 vezes.
+  motivo uma vez; se reprovar de novo, o caso vai para um humano.
 - **finalize** (código, sem LLM) marca `escalate_to_human` se a urgência for alta ou se a
   revisão não aprovou a resposta.
 
@@ -49,8 +49,8 @@ hash de cada um.
 
 O agente só pode prometer o que está nela: prazos de troca e devolução, reembolso em até
 10 dias úteis no mesmo meio de pagamento, compensações por atraso (frete reembolsado a
-partir de 3 dias úteis; acima de 7 dias úteis, cupom de 15% e cancelamento com reembolso
-total) e quem paga o frete de devolução.
+partir de 3 dias úteis; acima de 7 dias úteis, o cliente escolhe entre cupom de 15% ou
+cancelamento com reembolso total) e quem paga o frete de devolução.
 
 ## Dados
 

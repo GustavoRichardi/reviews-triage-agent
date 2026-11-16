@@ -68,3 +68,12 @@ def test_search_k_is_capped_by_corpus_size():
 def test_missing_policies_dir_fails_loudly(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_chunks(tmp_path)
+
+
+def test_long_delay_compensations_are_a_choice_not_cumulative():
+    # Acima de 7 dias úteis: cupom OU cancelamento; o frete é reembolsado nos dois casos.
+    long_delay = next(
+        c for c in load_chunks(POLICIES) if c.section == "Atraso acima de 7 dias úteis"
+    )
+    assert "escolhe" in long_delay.text and "não se somam" in long_delay.text
+    assert "frete" in long_delay.text

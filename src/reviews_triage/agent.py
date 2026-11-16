@@ -22,8 +22,9 @@ from reviews_triage.prompts import PROMPT_NAMES, load_prompt, prompt_version
 from reviews_triage.schemas import Classification, LLMCall, ReviewVerdict, TriageResult
 
 TOP_K = 3
-# Quantas vezes a revisão pode devolver o rascunho. Total de rascunhos = 1 + MAX_REDRAFTS.
-MAX_REDRAFTS = 2
+# Quantas vezes a revisão pode devolver o rascunho. Total de rascunhos = 1 + MAX_REDRAFTS:
+# se a revisão reprovar duas vezes, o caso vai para um humano.
+MAX_REDRAFTS = 1
 
 # Dica em linguagem natural acrescentada à consulta de busca (ver DECISIONS.md, D31).
 CATEGORY_QUERY_HINT: dict[Category, str] = {

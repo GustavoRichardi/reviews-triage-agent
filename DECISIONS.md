@@ -225,8 +225,7 @@ Mais recentes no fim.
   parcial com `escalate_to_human=True` e o motivo. Resposta truncada por `max_tokens` é erro.
 - **Por quê:** avaliações são texto de usuário e podem acionar os classificadores de segurança.
   Um humano deve ver esses casos, e o custo da chamada recusada continua contado.
-- **Não adotado (decisão sua):** *fallback* automático para outro modelo no servidor. Ele
-  esconderia qual modelo respondeu cada avaliação e contaminaria a comparação da Fase 5.
+- **Fallback desativado (ver D38).**
 
 ### D29. `LLM` como `Protocol` de dois métodos
 - **O quê:** o agente depende de `parse()` e `text()`; `AnthropicLLM` é a implementação real.
@@ -241,8 +240,8 @@ Mais recentes no fim.
 - **Por quê:** "quando chamar um humano" precisa ser previsível e testável, não depender de um
   LLM. Isso acrescenta um nó ao desenho de quatro passos, mas mantém o grafo como a única
   fonte do comportamento (API e avaliação só chamam `run()`).
-- **Interpretação a confirmar:** "máx. 2 tentativas" foi lido como **até 2 reescritas** (no
-  máximo 3 rascunhos). Se a intenção era 2 rascunhos no total, é só mudar `MAX_REDRAFTS` para 1.
+- **Limite de tentativas:** `MAX_REDRAFTS = 1`, ou seja, **2 rascunhos no total**. Se a revisão
+  reprovar os dois, o caso escala para um humano (ver D37).
 
 ### D31. Busca de política: embeddings locais, Chroma em memória, consulta com dica de categoria
 - **O quê:** `paraphrase-multilingual-MiniLM-L12-v2` (local, multilíngue) gera os vetores; o Chroma
@@ -291,3 +290,32 @@ Mais recentes no fim.
 - **Por quê:** os prompts de sistema são curtos (abaixo do tamanho mínimo cacheável) e as saídas
   são pequenas. O `LLMCall` já registra tokens de cache lidos/escritos, então a Fase 5 mostra se
   vale a pena (por exemplo, se o prompt crescer).
+
+### D37. No máximo 2 rascunhos; duas reprovações escalam para humano
+- **O quê:** `MAX_REDRAFTS = 1`. O `review` pode devolver o rascunho uma vez; se reprovar a
+  segunda versão, `escalate_to_human=True` e o último rascunho vai junto, marcado para revisão.
+- **Por quê:** se o modelo errou duas vezes no mesmo caso, uma terceira tentativa tende a errar
+  igual (o caso costuma ser ambíguo ou a política não o cobre). Um humano resolve melhor, e
+  cada tentativa a mais custa duas chamadas (draft + review) e aumenta a latência.
+- **Descartado:** 3 rascunhos (custo e latência a mais para um ganho provavelmente pequeno; a
+  Fase 5 mostra quantos casos são aprovados só na segunda tentativa).
+
+### D38. Sem fallback automático de modelo quando há recusa
+- **O quê:** não usamos o `fallbacks` do lado do servidor (que reenvia a requisição recusada para
+  outro modelo). Recusa vira `escalate_to_human` (D28).
+- **Por quê:** (1) a Fase 5 compara Opus × Sonnet × Haiku; com fallback, parte das respostas
+  de um modelo seria gerada por outro e a comparação mediria uma mistura; (2) custo e latência
+  por avaliação ficariam dependentes de um segundo modelo com outro preço; (3) uma avaliação
+  que aciona recusa é, ela mesma, um caso que merece olhar humano.
+- **Quando rever:** depois que a Fase 5 fixar o modelo padrão, se a taxa de recusa medida for
+  relevante a ponto de sobrecarregar a fila humana.
+- **Descartado:** fallback ativado por padrão (recomendação geral do SDK, que não se encaixa
+  num projeto cujo resultado principal é comparar modelos).
+
+### D39. Atraso acima de 7 dias úteis: o cliente escolhe uma compensação
+- **O quê:** acima de 7 dias úteis o cliente escolhe entre manter o pedido com cupom de 15% ou
+  cancelar com reembolso total; o reembolso do frete (a partir de 3 dias úteis) vale nos dois
+  casos. O texto da política diz explicitamente que as opções não se somam, e um teste confere.
+- **Por quê:** decisão de negócio do projeto. Escrever "não se somam" de forma literal importa
+  para o agente: uma frase ambígua na política vira promessa errada na resposta.
+- **Descartado:** compensações cumulativas (versão do primeiro rascunho da política).

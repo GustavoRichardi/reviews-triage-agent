@@ -141,3 +141,52 @@ Mais recentes no fim.
 - **Por quê:** o Excel em pt-BR só mostra acentos com BOM e salva CSV com `;`. Melhor o código
   aceitar isso do que pedir para quem rotula configurar exportação.
 - **Descartado:** exigir um formato exato e falhar.
+
+## Fase 3 — Baseline clássico
+
+### D19. TF-IDF de palavras (uni + bigramas) + Regressão Logística
+- **O quê:** `TfidfVectorizer(strip_accents="unicode", ngram_range=(1, 2), sublinear_tf=True)` +
+  `LogisticRegression(class_weight="balanced")`, hiperparâmetros fixos (sem busca).
+- **Por quê:** é o baseline clássico de classificação de texto: rápido, barato, interpretável
+  (dá para listar os termos mais fortes de cada categoria) e difícil de bater com pouco dado.
+  Bigramas capturam negação e expressões ("nao chegou", "veio errado"); `strip_accents` junta
+  "não"/"nao", comum em avaliações digitadas no celular; `class_weight` compensa categorias raras.
+- **Descartado:** n-gramas de caracteres (mais robustos a erro de digitação, mas pouco
+  interpretáveis); busca de hiperparâmetros (com 150 exemplos, escolher hiperparâmetros na
+  mesma validação cruzada que reporta o resultado inflaria a métrica; validação aninhada seria
+  complexidade sem ganho real aqui).
+
+### D20. A nota entra como token (`nota_1` … `nota_5`)
+- **O quê:** a entrada do modelo é `"nota_<n> <texto>"`.
+- **Por quê:** o agente vai receber a nota, então o baseline também precisa dela para a
+  comparação ser justa. Um token é a forma mais simples de dar essa informação ao TF-IDF.
+- **Descartado:** `ColumnTransformer` com one-hot da nota (mesmo efeito, mais código).
+
+### D21. Validação cruzada repetida (5 folds × 5 repetições) + referência de classe majoritária
+- **O quê:** média ± desvio de accuracy e F1 macro sobre 25 divisões; um `DummyClassifier`
+  (sempre a classe mais comum) avaliado da mesma forma.
+- **Por quê:** com 150 exemplos, o resultado de uma única divisão em folds depende da sorte; o
+  desvio padrão mostra o quanto o número é confiável. O dummy é o piso: se o modelo não o
+  supera com folga, não aprendeu nada útil.
+- **Descartado:** um único split treino/teste (estimativa ruidosa e desperdiça dados).
+
+### D22. F1 macro como métrica principal
+- **O quê:** F1 macro em destaque; accuracy aparece como apoio.
+- **Por quê:** o F1 macro dá peso igual a cada categoria. Com classes desbalanceadas, um modelo
+  que só acerta `elogio` pode ter accuracy razoável e ser inútil para triagem.
+- **Descartado:** accuracy e F1 ponderado (ambos dominados pelas classes grandes).
+
+### D23. Matriz de confusão a partir de predições out-of-fold
+- **O quê:** `cross_val_predict` com 5 folds: cada avaliação é prevista por um modelo que não a
+  viu no treino. A mesma função vai fornecer as predições do baseline na Fase 5.
+- **Por quê:** é a forma honesta de ter uma predição por exemplo do gold set sem um conjunto de
+  teste separado (que, com 150 exemplos, ficaria pequeno demais).
+- **Descartado:** treinar no gold set inteiro e prever nele mesmo (mede memorização).
+
+### D24. Relatório em Markdown com hash do gold set
+- **O quê:** `reports/baseline.md` (sobrescrito a cada execução; o histórico fica no git), com
+  data, versão do scikit-learn e o sha256 do `gold.csv`.
+- **Por quê:** Markdown renderiza no GitHub sem dependência extra. O hash diz exatamente com
+  qual versão dos rótulos o número foi gerado. Se um rótulo for corrigido, o número muda e o
+  hash também.
+- **Descartado:** imagem PNG da matriz de confusão (exigiria matplotlib em produção).

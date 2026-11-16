@@ -57,7 +57,10 @@ make check             # lint + testes
 
 ## Resultados
 
-_(Fase 5 — baseline vs. agente, custo por 1.000 avaliações.)_
+**Baseline clássico** (`make baseline`): TF-IDF + Regressão Logística, avaliado com validação
+cruzada repetida no gold set. Relatório completo em [`reports/baseline.md`](reports/baseline.md).
+
+_(Fase 5 — tabela baseline vs. agente, custo por 1.000 avaliações.)_
 
 ## Limitações e próximos passos
 

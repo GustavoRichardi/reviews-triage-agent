@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check data gold gold-check
+.PHONY: help install lint format test check data gold gold-check baseline
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -33,3 +33,6 @@ gold: ## Gera data/gold/to_label.csv (150 avaliações, 30 por nota) para rotula
 
 gold-check: ## Valida os rótulos em data/gold/gold.csv e mostra o progresso
 	uv run python -m reviews_triage.gold check
+
+baseline: ## Avalia TF-IDF + Regressão Logística no gold set e gera reports/baseline.md
+	uv run python -m reviews_triage.baseline

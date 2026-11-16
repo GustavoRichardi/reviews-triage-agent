@@ -24,6 +24,13 @@ Usamos o [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/d
 
 1. Baixe o dataset no Kaggle (é preciso estar logado).
 2. Copie `olist_order_reviews_dataset.csv` para `data/raw/`.
+3. Rode `make data`. Isso gera em `data/processed/`:
+   - `reviews_clean.csv`: só avaliações com comentário, texto normalizado (título + mensagem),
+     uma linha por `review_id`;
+   - `reviews_sample.csv`: amostra aleatória de 1.000 avaliações (seed 42) para desenvolvimento.
+
+A exploração inicial (distribuição de notas, tamanho dos textos) está em
+[`notebooks/01_exploration.ipynb`](notebooks/01_exploration.ipynb).
 
 ## Como rodar
 

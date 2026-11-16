@@ -46,3 +46,45 @@ Mais recentes no fim.
   As regras escolhidas pegam bugs reais (B), imports bagunçados (I) e sintaxe antiga (UP)
   sem virar ruído.
 - **Descartado:** `select = ["ALL"]` — gera muitos falsos positivos para um projeto pequeno.
+
+## Fase 1 — Dados
+
+### D07. Limpeza mínima e compartilhada
+- **O quê:** `clean()` só junta quebras de linha/espaços repetidos e tira espaços das pontas.
+  Não tira acento, não muda caixa, não remove pontuação nem stopwords.
+- **Por quê:** cada modelo tem seu próprio pré-processamento ideal. O TF-IDF pode normalizar
+  caixa/acentos dentro do vetorizador; o LLM e o modelo de embeddings funcionam melhor com o
+  texto original ("NÃO chegou!!" carrega urgência). Limpar demais aqui jogaria sinal fora para
+  todos.
+- **Descartado:** um pipeline de NLP "clássico" (lowercase, sem acento, stemming) aplicado a
+  todos os dados.
+
+### D08. Título + mensagem num único campo `text`
+- **O quê:** `text = "<título>. <mensagem>"`; o filtro "tem comentário" olha só a mensagem.
+- **Por quê:** títulos como "Produto errado" carregam a categoria de forma direta; descartá-los
+  seria perder sinal. Mas título sozinho ("Recomendo") é genérico demais para triar, então não
+  conta como comentário preenchido.
+- **Descartado:** usar só a mensagem; ou manter título e mensagem separados (complica todos os
+  consumidores para um ganho que não precisamos).
+
+### D09. Uma linha por `review_id`
+- **O quê:** `drop_duplicates(subset="review_id")`.
+- **Por quê:** no CSV original a mesma avaliação aparece ligada a mais de um pedido. Mantê-las
+  duplicaria textos e, pior, poderia colocar a mesma avaliação em treino e teste na validação
+  cruzada (vazamento de dados).
+- **Descartado:** deduplicar por texto idêntico: "Muito bom" escrito por clientes diferentes é
+  um dado real e faz parte da distribuição.
+
+### D10. Saída em CSV, amostra aleatória simples com seed fixa
+- **O quê:** `data/processed/*.csv`; amostra de 1.000 com `random_state=42`.
+- **Por quê:** CSV é legível em qualquer lugar e o pandas não precisa de dependência extra
+  (Parquet exigiria `pyarrow`). O volume (~dezenas de milhares de linhas) não justifica um
+  formato colunar. A seed fixa torna a amostra reprodutível.
+- **Descartado:** Parquet; amostra estratificada aqui (fica para o gold set, onde importa).
+
+### D11. Notebook só explora; a lógica fica no pacote
+- **O quê:** o notebook importa `reviews_triage.data.clean` em vez de reimplementar a limpeza.
+  `ipykernel` e `matplotlib` entram só no grupo `dev`.
+- **Por quê:** o que exploramos é exatamente o que os modelos vão ver, e a lógica fica testada
+  pelo pytest. Notebook com lógica própria tende a divergir do código de produção.
+- **Descartado:** fazer limpeza e análise juntas no notebook.

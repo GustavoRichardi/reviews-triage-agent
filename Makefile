@@ -4,7 +4,7 @@
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test check
+.PHONY: help install lint format test check data
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -24,3 +24,6 @@ test: ## Roda a suíte de testes
 	uv run pytest
 
 check: lint test ## O mesmo que a CI vai rodar
+
+data: ## Limpa as avaliações brutas e gera data/processed/ (requer data/raw/*.csv)
+	uv run python -m reviews_triage.data
